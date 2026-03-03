@@ -1,12 +1,25 @@
 # PenguinStokes.jl
 
-`PenguinStokes.jl` assembles a monophasic cut-cell Stokes system on a MAC-style set of shifted grids:
+[![In development documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://PenguinxCutCell.github.io/PenguinStokes.jl/dev)
+![CI](https://github.com/PenguinxCutCell/PenguinStokes.jl/actions/workflows/ci.yml/badge.svg)
+![Coverage](https://codecov.io/gh/PenguinxCutCell/PenguinStokes.jl/branch/main/graph/badge.svg)
 
-- pressure unknowns on `gridp`
-- velocity-component unknowns on staggered grids `gridu[d]`
-- per scalar/component unknown split `(uomega, ugamma)` using `CartesianOperators` (`G`, `H`, `Winv`)
+`PenguinStokes.jl` assembles monophasic cut-cell Stokes systems on MAC-style staggered grids using `CartesianGeometry.jl`, `CartesianOperators.jl`, and `PenguinSolverCore.jl`.
 
-Supported dimensions: 1D, 2D, 3D.
+## Feature Status
+
+| Area | Item | Status | Notes |
+|---|---|---|---|
+| Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
+| Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
+| Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
+| BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
+| BCs (velocity box) | Neumann | Implemented | Applied as flux terms |
+| BCs (velocity box) | Periodic | Implemented | Through periodic stencil/operator construction |
+| BCs (cut/interface) | Dirichlet on `u_γ` | Implemented | `bc_cut=Dirichlet(...)` |
+| BCs (cut/interface) | Neumann / Periodic | Missing | Explicitly rejected in current cut BC applier |
+| Pressure | Pin gauge | Implemented | `PinPressureGauge` |
+| Pressure | Mean gauge | Implemented | `MeanPressureGauge` |
 
 ## Unknown ordering
 
@@ -14,62 +27,7 @@ For `N` dimensions and `nt = prod(grid.n)`:
 
 `x = [uomega_1; ugamma_1; ...; uomega_N; ugamma_N; pomega]`
 
-with total size `(2N+1)*nt`.
-
-## Discrete operators and signs
-
-For each velocity component `d`, using `op_u[d]` and pressure operator `op_p`:
-
-- viscous blocks
-
-`L_oo[d] = mu * G_u[d]' * Winv_u[d] * G_u[d]`
-
-`L_og[d] = mu * G_u[d]' * Winv_u[d] * H_u[d]`
-
-- pressure gradient block (split from pressure operator rows)
-
-`Grad[d] = -(G_p + H_p)[rows_d, :]`
-
-- divergence/continuity blocks
-
-`Div_oo[d] = -(G_p[rows_d,:]' + H_p[rows_d,:]')`
-
-`Div_og[d] =  H_p[rows_d,:]'`
-
-Steady assembled equations:
-
-- momentum rows (`uomega_d`):
-
-`L_oo[d]*uomega_d + L_og[d]*ugamma_d + Grad[d]*pomega = V_d * f_d`
-
-- cut/interface tie rows (`ugamma_d`):
-
-`ugamma_d = g_cut,d`
-
-- continuity rows (`pomega`):
-
-`sum_d (Div_oo[d]*uomega_d + Div_og[d]*ugamma_d) = 0`
-
-Pressure gauge replaces one continuity row (pin or mean gauge).
-
-## Unsteady theta-scheme
-
-For `theta in [0,1]` (`:BE => 1`, `:CN => 0.5`):
-
-`(rho/dt)*V_d*uomega_d^{n+1} + theta*(L_oo[d]*uomega_d^{n+1} + L_og[d]*ugamma_d^{n+1}) + Grad[d]*pomega^{n+1}`
-
-`= (rho/dt)*V_d*uomega_d^n - (1-theta)*(L_oo[d]*uomega_d^n + L_og[d]*ugamma_d^n) + V_d*f_d^{n+theta}`
-
-Continuity and tie equations are assembled at `n+1`.
-
-## Boundary handling
-
-- Velocity box BCs are applied on **momentum (`uomega`) rows** via boundary-face flux terms (ghost elimination style), consistent with face-bounded MAC control volumes:
-  - `Dirichlet`: adds boundary conductance to diagonal + RHS contribution.
-  - `Neumann`: adds prescribed flux contribution to RHS.
-  - `Periodic`: handled through periodic stencils in `DiffusionOps`.
-- Cut/interface rows still enforce `ugamma = g_cut`.
-- Pressure BC is not imposed directly; use a pressure gauge (`PinPressureGauge` or `MeanPressureGauge`).
+Total size: `(2N+1)*nt`.
 
 ## Quick start
 
@@ -97,12 +55,4 @@ model = StokesModelMono(
 sys = solve_steady!(model)
 ```
 
-See `examples/` for full scripts.
-
-`examples/04_mms_convergence.jl` runs a mesh refinement study (`n=17,33,65`) for a divergence-free MMS and prints:
-
-- velocity L2/L∞ error convergence (about first-order with current MAC operator stack),
-- gauge-corrected pressure L2 convergence and pressure range diagnostics (`min(p), max(p), max|p|`),
-- divergence norm (`L2`) on active pressure cells (near machine precision).
-
-`examples/05_mms_convergence_zero_pressure.jl` runs a zero-pressure polynomial MMS on a full box and reports near second-order velocity convergence in L2.
+See `examples/` for complete scripts including MMS/convergence checks.

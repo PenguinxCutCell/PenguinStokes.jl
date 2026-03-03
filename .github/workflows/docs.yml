@@ -1,0 +1,59 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+    paths:
+      - "docs/**"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+      - "*.toml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "*.toml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
+  statuses: write
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1"
+
+      - uses: julia-actions/cache@v2
+
+      - name: Instantiate docs environment
+        run: |
+          julia --project=docs -e '
+            using Pkg
+            Pkg.develop([
+              PackageSpec(url="https://github.com/PenguinxCutCell/Vofinit.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/VOFTools.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/VofiJul.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/CartesianGeometry.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/CartesianOperators.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/PenguinSolverCore.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/PenguinBCs.jl.git"),
+              PackageSpec(url="https://github.com/PenguinxCutCell/CartesianGrids.jl.git"),
+              PackageSpec(path=pwd())
+            ])
+            Pkg.instantiate()'
+
+      - name: Build and deploy docs
+        run: julia --project=docs docs/make.jl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}

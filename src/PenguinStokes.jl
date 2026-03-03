@@ -209,15 +209,15 @@ function _pressure_activity(cap::AssembledCapacity{N,T}) where {N,T}
     li = LinearIndices(cap.nnodes)
     @inbounds for I in CartesianIndices(cap.nnodes)
         i = li[I]
-        interior = true
+        physical = true
         for d in 1:N
-            # Pressure is cell-centered in MAC and uses one padded layer on both sides.
-            if I[d] == 1 || I[d] == cap.nnodes[d]
-                interior = false
+            # Node-padded layout: only the last layer is a halo.
+            if I[d] == cap.nnodes[d]
+                physical = false
                 break
             end
         end
-        if !interior
+        if !physical
             active[i] = false
             continue
         end
