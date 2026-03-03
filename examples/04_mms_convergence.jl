@@ -154,6 +154,67 @@ function metrics(model, sys)
     )
 end
 
+function exact_state(model)
+    x = zeros(Float64, last(model.layout.pomega))
+    for d in 1:2
+        cap = model.cap_u[d]
+        li = LinearIndices(cap.nnodes)
+        rows = model.layout.uomega[d]
+        for I in CartesianIndices(cap.nnodes)
+            i = li[I]
+            if I[1] < cap.nnodes[1] && I[2] < cap.nnodes[2]
+                pt = cap.C_ω[i]
+                x[rows[i]] = d == 1 ? u_exact(pt[1], pt[2]) : v_exact(pt[1], pt[2])
+            end
+        end
+    end
+
+    cap = model.cap_p
+    li = LinearIndices(cap.nnodes)
+    rows = model.layout.pomega
+    for I in CartesianIndices(cap.nnodes)
+        i = li[I]
+        if I[1] < cap.nnodes[1] && I[2] < cap.nnodes[2]
+            pt = cap.C_ω[i]
+            x[rows[i]] = p_exact(pt[1], pt[2])
+        end
+    end
+    return x
+end
+
+function momentum_residual_split(model, sys)
+    xe = exact_state(model)
+    r = sys.A * xe - sys.b
+    interior = Int[]
+    boundary = Int[]
+
+    for d in 1:2
+        cap = model.cap_u[d]
+        rows = model.layout.uomega[d]
+        li = LinearIndices(cap.nnodes)
+        for I in CartesianIndices(cap.nnodes)
+            i = li[I]
+            if !(I[1] < cap.nnodes[1] && I[2] < cap.nnodes[2])
+                continue
+            end
+            V = cap.buf.V[i]
+            if !(isfinite(V) && V > 0.0)
+                continue
+            end
+            strict_interior = (2 <= I[1] <= cap.nnodes[1] - 2) && (2 <= I[2] <= cap.nnodes[2] - 2)
+            if strict_interior
+                push!(interior, rows[i])
+            else
+                push!(boundary, rows[i])
+            end
+        end
+    end
+
+    r_int = isempty(interior) ? 0.0 : norm(r[interior], Inf)
+    r_bnd = isempty(boundary) ? 0.0 : norm(r[boundary], Inf)
+    return r_int, r_bnd
+end
+
 ns = (17, 33, 65)
 hs = Float64[]
 uL2 = Float64[]
@@ -163,6 +224,8 @@ vInf = Float64[]
 pL2 = Float64[]
 divL2 = Float64[]
 pmax = Float64[]
+rInt = Float64[]
+rBnd = Float64[]
 
 for n in ns
     grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
@@ -178,13 +241,18 @@ for n in ns
     push!(pL2, m.pL2)
     push!(divL2, m.divL2)
     push!(pmax, m.pmax)
+    ri, rb = momentum_residual_split(model, sys)
+    push!(rInt, ri)
+    push!(rBnd, rb)
 
-    println("n=$n  h=$(hs[end])  uL2=$(uL2[end])  vL2=$(vL2[end])  uInf=$(uInf[end])  vInf=$(vInf[end])  pL2=$(pL2[end])  divL2=$(divL2[end])  max|p|=$(pmax[end])")
+    println("n=$n  h=$(hs[end])  uL2=$(uL2[end])  vL2=$(vL2[end])  uInf=$(uInf[end])  vInf=$(vInf[end])  pL2=$(pL2[end])  divL2=$(divL2[end])  max|p|=$(pmax[end])  rIntInf=$(ri)  rBndInf=$(rb)")
 end
 
 for k in 1:(length(ns) - 1)
     ord_u = log(uL2[k] / uL2[k + 1]) / log(hs[k] / hs[k + 1])
     ord_v = log(vL2[k] / vL2[k + 1]) / log(hs[k] / hs[k + 1])
     ord_p = log(pL2[k] / pL2[k + 1]) / log(hs[k] / hs[k + 1])
-    println("order $(ns[k])->$(ns[k+1]): u=$ord_u  v=$ord_v  p=$ord_p")
+    ord_ri = log(rInt[k] / rInt[k + 1]) / log(hs[k] / hs[k + 1])
+    ord_rb = log(rBnd[k] / rBnd[k + 1]) / log(hs[k] / hs[k + 1])
+    println("order $(ns[k])->$(ns[k+1]): u=$ord_u  v=$ord_v  p=$ord_p  rInt=$ord_ri  rBnd=$ord_rb")
 end

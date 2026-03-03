@@ -56,3 +56,8 @@ sys = solve_steady!(model)
 ```
 
 See `examples/` for complete scripts including MMS/convergence checks.
+
+Key verification scripts:
+- `examples/04_mms_convergence.jl`: pressure-coupled streamfunction MMS (prints error orders and exact-state momentum residual split `interior` vs `boundary` to track order loss sources).
+- `examples/05_mms_convergence_zero_pressure.jl`: no-body zero-pressure MMS, near second-order velocity convergence.
+- `examples/06_mms_convergence_embedded_outside_circle.jl`: embedded-interface MMS for outside-circle fluid (`ϕ = R - sqrt((x-xc)^2 + (y-yc)^2)`), with no-slip on box and cut interface.
