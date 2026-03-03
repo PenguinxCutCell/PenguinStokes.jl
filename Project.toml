@@ -1,0 +1,35 @@
+name = "PenguinStokes"
+uuid = "7b7cbf4f-2a5e-4d87-9f58-4d06d0e8f8a5"
+version = "0.1.0"
+
+[deps]
+CartesianGeometry = "5961ddb3-e46d-41f1-806c-0197ba873d0b"
+CartesianGrids = "c0ffee00-c0ff-e000-c0ff-ee000c0ffee0"
+CartesianOperators = "6ffd2c7a-1a34-4f8b-a2c9-3d5e7f9b0c1d"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+PenguinBCs = "9a5f4c72-2b90-4b4f-93d2-7b2c8e4d1f30"
+PenguinSolverCore = "8f14e45f-7d0b-4a6b-9c1e-2f3d4b5a6c7d"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[sources]
+CartesianGeometry = {path = "../CartesianGeometry.jl"}
+CartesianGrids = {path = "../CartesianGrids.jl"}
+CartesianOperators = {path = "../CartesianOperators.jl"}
+PenguinBCs = {path = "../PenguinBCs.jl"}
+PenguinSolverCore = {path = "../PenguinSolverCore.jl"}
+
+[compat]
+CartesianGeometry = "0.1"
+CartesianGrids = "0.1"
+CartesianOperators = "0.1"
+PenguinBCs = "0.1"
+PenguinSolverCore = "0.1"
+StaticArrays = "1"
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
