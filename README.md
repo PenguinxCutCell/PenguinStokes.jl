@@ -12,6 +12,7 @@
 |---|---|---|---|
 | Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
 | Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
+| Models | Steady two-phase fixed-interface Stokes | Implemented | `StokesModelTwoPhase` with shared `u_γ` and traction rows |
 | Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
 | BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
 | BCs (velocity box) | Neumann | Implemented | Applied as flux terms |
@@ -28,6 +29,12 @@ For `N` dimensions and `nt = prod(grid.n)`:
 `x = [uomega_1; ugamma_1; ...; uomega_N; ugamma_N; pomega]`
 
 Total size: `(2N+1)*nt`.
+
+Two-phase fixed-interface ordering:
+
+`x = [uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma_1; ...; ugamma_N; pomega1; pomega2]`
+
+Total size: `(3N+2)*nt`.
 
 ## Quick start
 
@@ -61,3 +68,8 @@ Key verification scripts:
 - `examples/04_mms_convergence.jl`: pressure-coupled streamfunction MMS (prints error orders and exact-state momentum residual split `interior` vs `boundary` to track order loss sources).
 - `examples/05_mms_convergence_zero_pressure.jl`: no-body zero-pressure MMS, near second-order velocity convergence.
 - `examples/06_mms_convergence_embedded_outside_circle.jl`: embedded-interface MMS for outside-circle fluid (`ϕ = R - sqrt((x-xc)^2 + (y-yc)^2)`), with no-slip on box and cut interface.
+- `examples/08_two_phase_mms_fixed_interface.jl`: two-phase fixed-interface equilibrium with viscosity ratio and prescribed interface traction.
+- `examples/09_two_phase_planar_couette.jl`: two-layer planar Couette validation (periodic streamwise, fixed flat interface) with exact piecewise-linear profile.
+- `examples/10_two_phase_planar_poiseuille.jl`: two-layer planar Poiseuille validation (body-force equivalent, periodic streamwise) with exact piecewise-parabolic profile.
+- `examples/11_two_phase_oscillatory_couette.jl`: unsteady oscillatory two-layer Couette validation with harmonic amplitude/phase probe checks.
+- `examples/12_two_phase_viscous_drop_drag.jl`: 3D fixed spherical drop run with numerical drag compared against Hadamard–Rybczynski drag scaling.

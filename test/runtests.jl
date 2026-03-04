@@ -1,6 +1,7 @@
 using Test
 using LinearAlgebra
 using SparseArrays
+using StaticArrays: SMatrix, SVector
 
 using CartesianGrids: CartesianGrid
 using PenguinBCs: BorderConditions, Dirichlet, Periodic
@@ -124,6 +125,71 @@ function poly_box_bcs()
         bottom=Dirichlet(0.0), top=Dirichlet(0.0),
     )
     return bx, by
+end
+
+function two_layer_couette_profile(mu1, mu2, h, H, U)
+    τ = U / (h / mu1 + (H - h) / mu2)
+    a1 = τ / mu1
+    a2 = τ / mu2
+    b2 = τ * h * (inv(mu1) - inv(mu2))
+    u(y) = y <= h ? (a1 * y) : (a2 * y + b2)
+    return u
+end
+
+function two_layer_bodyforce_poiseuille_profile(mu1, mu2, h, H, G)
+    # With PenguinStokes sign convention: μ Δu = -G for f=(G,0), p_x=0.
+    C1 = -G / mu1
+    C2 = -G / mu2
+    M = [
+        mu1 -mu2 0.0
+        h -h -1.0
+        0.0 H 1.0
+    ]
+    rhs = [
+        0.0,
+        0.5 * (C2 - C1) * h^2,
+        -0.5 * C2 * H^2,
+    ]
+    A1, A2, B2 = M \ rhs
+    u(y) = y <= h ? (0.5 * C1 * y^2 + A1 * y) : (0.5 * C2 * y^2 + A2 * y + B2)
+    return u
+end
+
+function two_phase_velocity_error_metrics(model, sys, u_exact)
+    u1 = sys.x[model.layout.uomega1[1]]
+    u2 = sys.x[model.layout.uomega2[1]]
+    v1 = sys.x[model.layout.uomega1[2]]
+    v2 = sys.x[model.layout.uomega2[2]]
+
+    e1 = 0.0
+    e2 = 0.0
+    w1 = 0.0
+    w2 = 0.0
+    vInf = 0.0
+
+    for i in 1:model.cap_u1[1].ntotal
+        V = model.cap_u1[1].buf.V[i]
+        if isfinite(V) && V > 0.0
+            y = model.cap_u1[1].C_ω[i][2]
+            e = u1[i] - u_exact(y)
+            e1 += V * e^2
+            w1 += V
+            vInf = max(vInf, abs(v1[i]))
+        end
+    end
+
+    for i in 1:model.cap_u2[1].ntotal
+        V = model.cap_u2[1].buf.V[i]
+        if isfinite(V) && V > 0.0
+            y = model.cap_u2[1].C_ω[i][2]
+            e = u2[i] - u_exact(y)
+            e2 += V * e^2
+            w2 += V
+            vInf = max(vInf, abs(v2[i]))
+        end
+    end
+
+    return (u1L2=sqrt(e1 / w1), u2L2=sqrt(e2 / w2), vInf=vInf)
 end
 
 function pressure_active_indices(model, A)
@@ -644,6 +710,11 @@ end
         q_const = embedded_boundary_quantities(model, x_const; pressure_reconstruction=:none)
         @test norm(q_const.force_pressure) < 1e-10
         @test norm(q_const.force_viscous) < 1e-12
+        for x0 in ((0.5, 0.5), (0.15, 0.8), (1.1, -0.2))
+            q0 = embedded_boundary_quantities(model, x_const; pressure_reconstruction=:none, x0=x0)
+            @test norm(q0.force_pressure) < 1e-10
+            @test abs(q0.torque) < 1e-10
+        end
 
         # A2: linear pressure p=x (periodic outer box) -> |F_x| ≈ area(solid), F_y ≈ 0.
         x_lin = zeros(Float64, nsys)
@@ -681,4 +752,248 @@ end
         ord_lin = log(err_lin[k] / err_lin[k + 1]) / log(2)
         @test ord_lin > 0.7
     end
+end
+
+@testset "Stress/traction rigid-rotation kernel (symmetric-gradient killer)" begin
+    Grot = SMatrix{2,2,Float64}(0.0, -1.0, 1.0, 0.0) # skew-symmetric: rigid rotation
+    normals = (
+        SVector{2,Float64}(1.0, 0.0),
+        SVector{2,Float64}(0.0, 1.0),
+        normalize(SVector{2,Float64}(1.0, 1.0)),
+        normalize(SVector{2,Float64}(-2.0, 3.0)),
+    )
+
+    σrot = PenguinStokes._stress_tensor(1.0, Grot, 0.0)
+    @test norm(Matrix(σrot)) < 1e-14
+    for n in normals
+        t = PenguinStokes._traction_from_stress(σrot, n)
+        @test norm(t) < 1e-14
+    end
+
+    # Nonzero pressure should yield pure -p*n traction when symmetric part vanishes.
+    p0 = 2.5
+    σp = PenguinStokes._stress_tensor(1.0, Grot, p0)
+    for n in normals
+        t = PenguinStokes._traction_from_stress(σp, n)
+        @test isapprox(t, -p0 .* n; atol=1e-14, rtol=0.0)
+    end
+end
+
+@testset "Two-phase geometry sanity (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (41, 41))
+    xc, yc, r = 0.5, 0.5, 0.2
+    body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - r
+    bc = all_dirichlet_bc(Val(2))
+
+    model = StokesModelTwoPhase(
+        grid,
+        body,
+        1.0,
+        8.0;
+        bc_u=(bc, bc),
+        force1=(0.0, 0.0),
+        force2=(0.0, 0.0),
+        interface_force=(0.0, 0.0),
+    )
+
+    nt = model.cap_p1.ntotal
+    iface_count = 0
+    gsum = zeros(2)
+    for i in 1:nt
+        Γ1 = model.cap_p1.buf.Γ[i]
+        Γ2 = model.cap_p2.buf.Γ[i]
+        has1 = isfinite(Γ1) && Γ1 > 0.0
+        has2 = isfinite(Γ2) && Γ2 > 0.0
+        @test has1 == has2
+        has1 || continue
+        iface_count += 1
+        @test isapprox(Γ1, Γ2; atol=1e-10, rtol=1e-6)
+        n1 = model.cap_p1.n_γ[i]
+        n2 = model.cap_p2.n_γ[i]
+        @test norm(n1 + n2) < 2e-5
+        gsum .+= Γ1 .* collect(n1)
+    end
+
+    @test iface_count > 0
+    @test norm(gsum) < 2e-4
+end
+
+@testset "Two-phase pressure-jump traction balance (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (33, 33))
+    xc, yc, r = 0.5, 0.5, 0.2
+    body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - r
+    bc = all_dirichlet_bc(Val(2))
+
+    interface_force(x, y) = begin
+        dx = x - xc
+        dy = y - yc
+        rr = sqrt(dx^2 + dy^2)
+        rr == 0.0 ? SVector(0.0, 0.0) : SVector(dx / rr, dy / rr)
+    end
+
+    model = StokesModelTwoPhase(
+        grid,
+        body,
+        1.0,
+        3.0;
+        bc_u=(bc, bc),
+        force1=(0.0, 0.0),
+        force2=(0.0, 0.0),
+        interface_force=interface_force,
+    )
+
+    sys = solve_steady!(model)
+    rsys = sys.A * sys.x - sys.b
+    @test norm(rsys) < 1e-8
+
+    for d in 1:2
+        u1 = sys.x[model.layout.uomega1[d]]
+        u2 = sys.x[model.layout.uomega2[d]]
+        idx1 = physical_active_indices(model.cap_u1[d])
+        idx2 = physical_active_indices(model.cap_u2[d])
+        @test maximum(abs, u1[idx1]) < 2e-4
+        @test maximum(abs, u2[idx2]) < 2e-4
+    end
+
+    iface = interface_active_indices(model.cap_p1)
+    @test !isempty(iface)
+    for α in 1:2
+        rows = model.layout.ugamma[α]
+        rowvals = rsys[rows]
+        @test maximum(abs, rowvals[iface]) < 5e-7
+    end
+
+    p1 = sys.x[model.layout.pomega1]
+    p2 = sys.x[model.layout.pomega2]
+    idxp1 = findall(PenguinStokes._pressure_activity(model.cap_p1))
+    idxp2 = findall(PenguinStokes._pressure_activity(model.cap_p2))
+    p1mean = sum(p1[idxp1]) / length(idxp1)
+    p2mean = sum(p2[idxp2]) / length(idxp2)
+    @test abs(abs(p2mean - p1mean) - 1.0) < 0.2
+end
+
+@testset "Two-phase unsteady zero-state residual (2D, BE/CN)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (21, 21))
+    xc, yc, r = 0.5, 0.5, 0.2
+    body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - r
+    bc = all_dirichlet_bc(Val(2))
+    model = StokesModelTwoPhase(
+        grid,
+        body,
+        1.0,
+        3.0;
+        rho1=1.2,
+        rho2=0.7,
+        bc_u=(bc, bc),
+        force1=(0.0, 0.0),
+        force2=(0.0, 0.0),
+        interface_force=(0.0, 0.0),
+    )
+
+    nsys = last(model.layout.pomega2)
+    x0 = zeros(Float64, nsys)
+    sys_be = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    sys_cn = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+
+    assemble_unsteady!(sys_be, model, x0, 0.0, 0.05; scheme=:BE)
+    assemble_unsteady!(sys_cn, model, x0, 0.0, 0.05; scheme=:CN)
+
+    @test norm(sys_be.b) < 1e-10
+    @test norm(sys_cn.b) < 1e-10
+    @test norm(sys_be.A * x0 - sys_be.b) < 1e-10
+    @test norm(sys_cn.A * x0 - sys_cn.b) < 1e-10
+end
+
+@testset "Two-phase planar Couette validation (steady)" begin
+    mu1 = 1.0
+    mu2 = 5.0
+    h = 0.45
+    U = 1.0
+    H = 1.0
+    ns = (33, 65)
+    u_exact = two_layer_couette_profile(mu1, mu2, h, H, U)
+    body(x, y) = y - h
+
+    bcx = BorderConditions(
+        ; left=Periodic(), right=Periodic(),
+        bottom=Dirichlet(0.0), top=Dirichlet(U),
+    )
+    bcy = BorderConditions(
+        ; left=Periodic(), right=Periodic(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+
+    e1 = Float64[]
+    e2 = Float64[]
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        model = StokesModelTwoPhase(
+            grid,
+            body,
+            mu1,
+            mu2;
+            bc_u=(bcx, bcy),
+            force1=(0.0, 0.0),
+            force2=(0.0, 0.0),
+            interface_force=(0.0, 0.0),
+        )
+        sys = solve_steady!(model)
+        m = two_phase_velocity_error_metrics(model, sys, u_exact)
+        @test norm(sys.A * sys.x - sys.b) < 1e-8
+        @test m.vInf < 1e-6
+        push!(e1, m.u1L2)
+        push!(e2, m.u2L2)
+    end
+
+    @test e1[2] < e1[1]
+    @test e2[2] < e2[1]
+    @test e1[2] < 5e-5
+    @test e2[2] < 5e-5
+end
+
+@testset "Two-phase planar Poiseuille validation (steady body-force equivalent)" begin
+    mu1 = 1.0
+    mu2 = 4.0
+    h = 0.4
+    G = 1.5
+    H = 1.0
+    ns = (33, 65)
+    u_exact = two_layer_bodyforce_poiseuille_profile(mu1, mu2, h, H, G)
+    body(x, y) = y - h
+
+    bcx = BorderConditions(
+        ; left=Periodic(), right=Periodic(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy = BorderConditions(
+        ; left=Periodic(), right=Periodic(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+
+    e1 = Float64[]
+    e2 = Float64[]
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        model = StokesModelTwoPhase(
+            grid,
+            body,
+            mu1,
+            mu2;
+            bc_u=(bcx, bcy),
+            force1=(G, 0.0),
+            force2=(G, 0.0),
+            interface_force=(0.0, 0.0),
+        )
+        sys = solve_steady!(model)
+        m = two_phase_velocity_error_metrics(model, sys, u_exact)
+        @test norm(sys.A * sys.x - sys.b) < 1e-8
+        @test m.vInf < 1e-6
+        push!(e1, m.u1L2)
+        push!(e2, m.u2L2)
+    end
+
+    @test e1[2] < e1[1]
+    @test e2[2] < e2[1]
+    @test e1[2] < 2e-3
+    @test e2[2] < 2e-3
 end

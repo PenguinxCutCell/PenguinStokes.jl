@@ -1,6 +1,6 @@
 **Stokes model and discretization**
 
-This package assembles a monophasic Stokes system on MAC-style staggered grids with cut-cell geometry.
+This package assembles monophasic and fixed-interface two-phase Stokes systems on MAC-style staggered grids with cut-cell geometry.
 
 Unknown ordering
 
@@ -8,12 +8,22 @@ For `N` dimensions and `nt = prod(grid.n)`:
 
 `x = [uomega_1; ugamma_1; ...; uomega_N; ugamma_N; pomega]`
 
+Two-phase fixed-interface ordering:
+
+`x = [uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma_1; ...; ugamma_N; pomega1; pomega2]`
+
 Discrete structure
 
 - Momentum block per component uses `G' * Winv * G` / `G' * Winv * H` diffusion-style operators on velocity grids.
 - Pressure coupling is assembled via split gradient/divergence blocks built from pressure operators.
 - Interface/cut rows enforce `ugamma = g_cut` (Dirichlet currently).
 - Continuity rows enforce incompressibility with pressure gauge replacement for nullspace control.
+
+Two-phase interface rows
+
+- `StokesModelTwoPhase` uses shared `ugamma` traces and two pressure blocks (`pomega1`, `pomega2`).
+- Interface rows are assembled as traction-balance equations (pressure + viscous stress terms) with optional forcing `interface_force`.
+- Row masking keeps only overlap-support interface rows where both pressure-interface geometry and velocity-trace support are present, avoiding singular uncoupled trace modes.
 
 Wall closure on staggered grids
 
@@ -43,3 +53,5 @@ Embedded-boundary force and stress post-processing
 Unsteady formulation
 
 `assemble_unsteady!` supports theta schemes (`:BE`, `:CN`, numeric `theta`) by adding mass `(rho/dt) * V` to momentum omega blocks and corresponding RHS history terms.
+
+For `StokesModelTwoPhase`, unsteady assembly applies the same theta update independently on each phase momentum block (`uomega1`, `uomega2`) while keeping interface traction rows algebraic at `t_{n+1}`.

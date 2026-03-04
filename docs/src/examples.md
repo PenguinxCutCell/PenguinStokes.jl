@@ -6,6 +6,11 @@ Run from repository root:
 
 ```bash
 julia --project=. examples/04_mms_convergence.jl
+julia --project=. examples/08_two_phase_mms_fixed_interface.jl
+julia --project=. examples/09_two_phase_planar_couette.jl
+julia --project=. examples/10_two_phase_planar_poiseuille.jl
+julia --project=. examples/11_two_phase_oscillatory_couette.jl
+julia --project=. examples/12_two_phase_viscous_drop_drag.jl
 julia --project=. examples/07_unsteady_sphere_drag.jl
 ```
 
