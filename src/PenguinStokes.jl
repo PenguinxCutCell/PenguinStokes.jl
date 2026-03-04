@@ -5,7 +5,7 @@ using SparseArrays
 using StaticArrays
 
 using CartesianGeometry: GeometricMoments, geometric_moments, nan
-using CartesianGrids: CartesianGrid, grid1d, meshsize
+using CartesianGrids: CartesianGrid, SpaceTimeCartesianGrid, grid1d, meshsize
 using CartesianOperators: AssembledCapacity, DiffusionOps, assembled_capacity, each_boundary_cell, periodic_flags, side_info
 using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, eval_bc, validate_borderconditions!
 using PenguinSolverCore: LinearSystem, solve!
@@ -13,7 +13,9 @@ using PenguinSolverCore: LinearSystem, solve!
 export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge
 export StokesLayout, StokesModelMono, staggered_velocity_grids
 export StokesLayoutTwoPhase, StokesModelTwoPhase
+export MovingStokesModelMono
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
+export assemble_unsteady_moving!, solve_unsteady_moving!
 export embedded_boundary_quantities, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
 
 abstract type AbstractPressureGauge end
@@ -137,6 +139,32 @@ mutable struct StokesModelTwoPhase{N,T,FT1,FT2,IFT,BT}
     layout::StokesLayoutTwoPhase{N}
 end
 
+mutable struct MovingStokesModelMono{N,T,FT,BT}
+    gridp::CartesianGrid{N,T}
+    gridu::NTuple{N,CartesianGrid{N,T}}
+    body::BT
+    mu::T
+    rho::T
+    force::FT
+    bc_u::NTuple{N,BorderConditions}
+    bc_p::Union{Nothing,BorderConditions}
+    bc_cut_u::NTuple{N,AbstractBoundary}
+    gauge::AbstractPressureGauge
+    strong_wall_bc::Bool
+    periodic::NTuple{N,Bool}
+    geom_method::Symbol
+    layout::StokesLayout{N}
+    cap_p_slab::Union{Nothing,AssembledCapacity{N,T}}
+    op_p_slab::Union{Nothing,DiffusionOps{N,T}}
+    cap_p_end::Union{Nothing,AssembledCapacity{N,T}}
+    op_p_end::Union{Nothing,DiffusionOps{N,T}}
+    cap_u_slab::Union{Nothing,NTuple{N,AssembledCapacity{N,T}}}
+    op_u_slab::Union{Nothing,NTuple{N,DiffusionOps{N,T}}}
+    cap_u_end::Union{Nothing,NTuple{N,AssembledCapacity{N,T}}}
+    Vun::Union{Nothing,NTuple{N,Vector{T}}}
+    Vun1::Union{Nothing,NTuple{N,Vector{T}}}
+end
+
 function _default_force(::Type{T}, ::Val{N}) where {T,N}
     return ntuple(_ -> zero(T), N)
 end
@@ -151,6 +179,18 @@ end
 
 function _normalize_bc_tuple(bc_u::BorderConditions, ::Val{1})
     return (bc_u,)
+end
+
+function _normalize_cut_bc_tuple(bc_cut_u::NTuple{N,AbstractBoundary}) where {N}
+    return bc_cut_u
+end
+
+function _normalize_cut_bc_tuple(bc_cut_u::AbstractBoundary, ::Val{1})
+    return (bc_cut_u,)
+end
+
+function _normalize_cut_bc_tuple(bc_cut_u::AbstractBoundary, ::Val{N}) where {N}
+    return ntuple(_ -> bc_cut_u, N)
 end
 
 function _validate_pressure_bc(
@@ -252,6 +292,20 @@ function _force_values(model::StokesModelTwoPhase{N,T}, phase::Int, d::Int, t::T
     out = Vector{T}(undef, nt)
     @inbounds for i in 1:nt
         out[i] = _force_component(force, d, cap.C_ω[i], t)
+    end
+    return out
+end
+
+function _force_values(
+    model::MovingStokesModelMono{N,T},
+    cap::AssembledCapacity{N,T},
+    d::Int,
+    t::T,
+) where {N,T}
+    nt = cap.ntotal
+    out = Vector{T}(undef, nt)
+    @inbounds for i in 1:nt
+        out[i] = _force_component(model.force, d, cap.C_ω[i], t)
     end
     return out
 end
@@ -520,6 +574,44 @@ function _stokes_row_activity(model::StokesModelTwoPhase{N,T}, A::SparseMatrixCS
     return _prune_uncoupled_active!(active, A)
 end
 
+function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrixCSC{T,Int}) where {N,T}
+    isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
+    isnothing(model.cap_p_end) && throw(ArgumentError("moving model pressure end-capacity cache is not built"))
+    cap_u_end = something(model.cap_u_end)
+    cap_p_end = something(model.cap_p_end)
+
+    layout = model.layout
+    active = falses(nunknowns(layout))
+    @inbounds for d in 1:N
+        aomega, agamma = _cell_activity_masks(cap_u_end[d])
+        for i in 1:cap_u_end[d].ntotal
+            active[layout.uomega[d][i]] = aomega[i]
+            active[layout.ugamma[d][i]] = agamma[i]
+        end
+    end
+
+    pactive = _pressure_activity(cap_p_end)
+    pfirst = first(layout.pomega)
+    plast = last(layout.pomega)
+    @inbounds for i in 1:cap_p_end.ntotal
+        pactive[i] || continue
+        col = layout.pomega[i]
+        coupled = false
+        for ptr in nzrange(A, col)
+            row = A.rowval[ptr]
+            if (row < pfirst || row > plast) && active[row] && A.nzval[ptr] != zero(T)
+                coupled = true
+                break
+            end
+        end
+        pactive[i] = coupled
+    end
+    @inbounds for i in 1:cap_p_end.ntotal
+        active[layout.pomega[i]] = pactive[i]
+    end
+    return _prune_uncoupled_active!(active, A)
+end
+
 function _apply_row_identity_constraints!(
     A::SparseMatrixCSC{T,Int},
     b::Vector{T},
@@ -707,6 +799,28 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
     return A, b
 end
 
+function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::MovingStokesModelMono{N,T}, t::T) where {N,T}
+    isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
+    cap_u_end = something(model.cap_u_end)
+    layout = model.layout
+    for d in 1:N
+        _apply_component_velocity_box_bc!(
+            A,
+            b,
+            d,
+            model.strong_wall_bc,
+            model.gridp,
+            cap_u_end[d],
+            model.mu,
+            model.bc_u[d],
+            layout.uomega[d],
+            layout.uomega[d],
+            t,
+        )
+    end
+    return A, b
+end
+
 function _pressure_side_bc(bc_p::Union{Nothing,BorderConditions}, side::Symbol, ::Type{T}) where {T}
     isnothing(bc_p) && return Neumann(zero(T))
     return get(bc_p.borders, side, Neumann(zero(T)))
@@ -830,6 +944,16 @@ function _apply_pressure_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
     return A, b
 end
 
+function _apply_pressure_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::MovingStokesModelMono{N,T}, t::T) where {N,T}
+    model.strong_wall_bc || return A, b
+    isnothing(model.bc_p) && return A, b
+    isnothing(model.cap_p_end) && throw(ArgumentError("moving model pressure end-capacity cache is not built"))
+    cap_p_end = something(model.cap_p_end)
+    return _apply_pressure_box_bc_block!(
+        A, b, model.gridp, cap_p_end, model.layout.pomega, model.periodic, model.bc_p, t
+    )
+end
+
 function _first_active_pressure_index(model::StokesModelMono{N,T}) where {N,T}
     pactive = _pressure_activity(model.cap_p)
     idx = findfirst(pactive)
@@ -942,6 +1066,47 @@ function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::
     throw(ArgumentError("unsupported pressure gauge type $(typeof(model.gauge))"))
 end
 
+function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::MovingStokesModelMono{N,T}) where {N,T}
+    isnothing(model.cap_p_end) && throw(ArgumentError("moving model pressure end-capacity cache is not built"))
+    cap_p_end = something(model.cap_p_end)
+
+    layout = model.layout
+    nt = cap_p_end.ntotal
+    row = first(layout.pomega)
+
+    if model.gauge isa PinPressureGauge
+        idx = if !isnothing(model.gauge.index)
+            model.gauge.index
+        else
+            pactive = _pressure_activity(cap_p_end)
+            coupled = _first_coupled_pressure_index(A, layout.pomega, pactive)
+            isnothing(coupled) ? _first_active_pressure_index(cap_p_end) : coupled
+        end
+        1 <= idx <= nt || throw(ArgumentError("pressure pin index must be in 1:$nt"))
+        col = layout.pomega[idx]
+        _enforce_dirichlet!(A, b, row, col, zero(T))
+        return A, b
+    elseif model.gauge isa MeanPressureGauge
+        @inbounds for j in 1:size(A, 2)
+            A[row, j] = zero(T)
+        end
+        pactive = _pressure_activity(cap_p_end)
+        active_idx = findall(pactive)
+        if isempty(active_idx)
+            A[row, layout.pomega[1]] = one(T)
+        else
+            w = inv(convert(T, length(active_idx)))
+            @inbounds for i in active_idx
+                A[row, layout.pomega[i]] = w
+            end
+        end
+        b[row] = zero(T)
+        return A, b
+    end
+
+    throw(ArgumentError("unsupported pressure gauge type $(typeof(model.gauge))"))
+end
+
 function _theta_from_scheme(::Type{T}, scheme) where {T}
     if scheme isa Symbol
         if scheme === :BE
@@ -956,6 +1121,152 @@ function _theta_from_scheme(::Type{T}, scheme) where {T}
         return theta
     end
     throw(ArgumentError("scheme must be Symbol (:BE/:CN) or numeric theta"))
+end
+
+psip_cn(Vn, Vn1) = (iszero(Vn) && iszero(Vn1)) ? 0.0 : 0.5
+psim_cn(Vn, Vn1) = (iszero(Vn) && iszero(Vn1)) ? 0.0 : 0.5
+psip_be(Vn, Vn1) = (iszero(Vn) && iszero(Vn1)) ? 0.0 : 1.0
+psim_be(Vn, Vn1) = 0.0
+
+function _psi_functions(scheme)
+    if scheme isa Symbol
+        if scheme === :CN
+            return psip_cn, psim_cn
+        elseif scheme === :BE
+            return psip_be, psim_be
+        end
+    elseif scheme isa Real
+        θ = Float64(scheme)
+        psip = (Vn, Vn1) -> (iszero(Vn) && iszero(Vn1) ? 0.0 : θ)
+        psim = (Vn, Vn1) -> (iszero(Vn) && iszero(Vn1) ? 0.0 : (1.0 - θ))
+        return psip, psim
+    end
+    throw(ArgumentError("moving scheme must be :BE, :CN, or numeric θ"))
+end
+
+function _eval_levelset_time(body, x::SVector{N,T}, t::T) where {N,T}
+    if applicable(body, x..., t)
+        return convert(T, body(x..., t))
+    elseif applicable(body, x...)
+        return convert(T, body(x...))
+    end
+    throw(ArgumentError("level-set callback must accept (x...) or (x..., t)"))
+end
+
+function _space_moments_at_time(
+    model::MovingStokesModelMono{N,T},
+    xyz_space::NTuple{N,AbstractVector{T}},
+    t::T,
+) where {N,T}
+    body_t = (x...) -> _eval_levelset_time(model.body, SVector{N,T}(x), t)
+    return geometric_moments(body_t, xyz_space, T, nan; method=model.geom_method)
+end
+
+function _slice_spacetime_to_space(
+    vec_st::AbstractVector,
+    nn_space::NTuple{N,Int},
+    nt::Int,
+    it::Int,
+) where {N}
+    dims_st = (nn_space..., nt)
+    li_st = LinearIndices(dims_st)
+    li_sp = LinearIndices(nn_space)
+    out = similar(vec_st, prod(nn_space))
+    @inbounds for I in CartesianIndices(nn_space)
+        out[li_sp[I]] = vec_st[li_st[Tuple(I)..., it]]
+    end
+    return out
+end
+
+function reduce_slab_to_space(
+    m_st::GeometricMoments{N1,T},
+    nn_space::NTuple{N,Int},
+) where {N1,N,T}
+    N1 == N + 1 || throw(ArgumentError("expected slab moments dimension $(N + 1), got $N1"))
+    nt = length(m_st.xyz[N1])
+    nt == 2 || throw(ArgumentError("space-time reduction expects 2 time nodes, got $nt"))
+
+    V = _slice_spacetime_to_space(m_st.V, nn_space, nt, 1)
+    Γ = _slice_spacetime_to_space(m_st.interface_measure, nn_space, nt, 1)
+    ctype = _slice_spacetime_to_space(m_st.cell_type, nn_space, nt, 1)
+    A = ntuple(d -> _slice_spacetime_to_space(m_st.A[d], nn_space, nt, 1), N)
+    B = ntuple(d -> _slice_spacetime_to_space(m_st.B[d], nn_space, nt, 1), N)
+    W = ntuple(d -> _slice_spacetime_to_space(m_st.W[d], nn_space, nt, 1), N)
+
+    bary_st = _slice_spacetime_to_space(m_st.barycenter, nn_space, nt, 1)
+    baryγ_st = _slice_spacetime_to_space(m_st.barycenter_interface, nn_space, nt, 1)
+    nγ_st = _slice_spacetime_to_space(m_st.interface_normal, nn_space, nt, 1)
+
+    bary = Vector{SVector{N,T}}(undef, length(V))
+    baryγ = Vector{SVector{N,T}}(undef, length(V))
+    nγ = Vector{SVector{N,T}}(undef, length(V))
+    @inbounds for i in eachindex(V)
+        bi = bary_st[i]
+        bγi = baryγ_st[i]
+        ni = nγ_st[i]
+        bary[i] = SVector{N,T}(ntuple(d -> bi[d], N))
+        baryγ[i] = SVector{N,T}(ntuple(d -> bγi[d], N))
+        nγ[i] = SVector{N,T}(ntuple(d -> ni[d], N))
+    end
+
+    xyz = ntuple(d -> collect(T, m_st.xyz[d]), N)
+    return GeometricMoments(V, bary, Γ, ctype, baryγ, nγ, A, B, W, xyz)
+end
+
+function _build_moving_slab!(
+    model::MovingStokesModelMono{N,T},
+    t::T,
+    dt::T,
+) where {N,T}
+    xyz_p = grid1d(model.gridp)
+    body_n = (x...) -> _eval_levelset_time(model.body, SVector{N,T}(x), t)
+    body_n1 = (x...) -> _eval_levelset_time(model.body, SVector{N,T}(x), t + dt)
+    moms_p_n1 = _space_moments_at_time(model, xyz_p, t + dt)
+
+    stgrid_p = SpaceTimeCartesianGrid(model.gridp, T[t, t + dt])
+    xyz_st_p = grid1d(stgrid_p)
+    body_st = (x...) -> begin
+        xs = SVector{N,T}(ntuple(d -> convert(T, x[d]), N))
+        _eval_levelset_time(model.body, xs, convert(T, x[N + 1]))
+    end
+    moms_p_st = geometric_moments(body_st, xyz_st_p, T, nan; method=model.geom_method)
+    moms_p_slab = reduce_slab_to_space(moms_p_st, model.gridp.n)
+    cap_p_slab = assembled_capacity(moms_p_slab; bc=zero(T))
+    op_p_slab = DiffusionOps(cap_p_slab; periodic=model.periodic)
+    cap_p_end = assembled_capacity(moms_p_n1; bc=zero(T))
+    op_p_end = DiffusionOps(cap_p_end; periodic=model.periodic)
+
+    ugeom = ntuple(d -> begin
+        xyz_u = grid1d(model.gridu[d])
+        moms_u_n = geometric_moments(body_n, xyz_u, T, nan; method=model.geom_method)
+        moms_u_n1 = geometric_moments(body_n1, xyz_u, T, nan; method=model.geom_method)
+        stgrid_u = SpaceTimeCartesianGrid(model.gridu[d], T[t, t + dt])
+        xyz_st_u = grid1d(stgrid_u)
+        moms_u_st = geometric_moments(body_st, xyz_st_u, T, nan; method=model.geom_method)
+        moms_u_slab = reduce_slab_to_space(moms_u_st, model.gridu[d].n)
+        (
+            cap_slab=assembled_capacity(moms_u_slab; bc=zero(T)),
+            cap_end=assembled_capacity(moms_u_n1; bc=zero(T)),
+            Vn=Vector{T}(moms_u_n.V),
+            Vn1=Vector{T}(moms_u_n1.V),
+        )
+    end, N)
+    cap_u_slab = ntuple(d -> ugeom[d].cap_slab, N)
+    op_u_slab = ntuple(d -> DiffusionOps(cap_u_slab[d]; periodic=model.periodic), N)
+    cap_u_end = ntuple(d -> ugeom[d].cap_end, N)
+    Vun = ntuple(d -> ugeom[d].Vn, N)
+    Vun1 = ntuple(d -> ugeom[d].Vn1, N)
+
+    model.cap_p_slab = cap_p_slab
+    model.op_p_slab = op_p_slab
+    model.cap_p_end = cap_p_end
+    model.op_p_end = op_p_end
+    model.cap_u_slab = cap_u_slab
+    model.op_u_slab = op_u_slab
+    model.cap_u_end = cap_u_end
+    model.Vun = Vun
+    model.Vun1 = Vun1
+    return model
 end
 
 function _expand_prev_state(model::StokesModelMono{N,T}, x_prev::AbstractVector) where {N,T}
@@ -979,6 +1290,22 @@ function _expand_prev_state(model::StokesModelTwoPhase{N,T}, x_prev::AbstractVec
     length(x_prev) == nsys ||
         throw(DimensionMismatch("x_prev length must be $nsys for two-phase full state"))
     return Vector{T}(x_prev)
+end
+
+function _expand_prev_state(model::MovingStokesModelMono{N,T}, x_prev::AbstractVector) where {N,T}
+    nsys = nunknowns(model.layout)
+    nt = model.layout.nt
+    if length(x_prev) == nsys
+        return Vector{T}(x_prev)
+    elseif length(x_prev) == N * nt
+        x = zeros(T, nsys)
+        @inbounds for d in 1:N
+            src = ((d - 1) * nt + 1):(d * nt)
+            x[model.layout.uomega[d]] .= x_prev[src]
+        end
+        return x
+    end
+    throw(DimensionMismatch("x_prev length must be $nsys (full state) or $(N * nt) (uomega blocks)"))
 end
 
 function _stokes_blocks(model::StokesModelMono{N,T}) where {N,T}
@@ -1500,6 +1827,136 @@ function assemble_unsteady!(
     return sys
 end
 
+function assemble_unsteady_moving!(
+    sys::LinearSystem{T},
+    model::MovingStokesModelMono{N,T},
+    x_prev::AbstractVector,
+    t::T,
+    dt::T;
+    scheme=:CN,
+) where {N,T}
+    dt > zero(T) || throw(ArgumentError("dt must be positive"))
+    theta = _theta_from_scheme(T, scheme)
+    psip, psim = _psi_functions(scheme)
+    t_next = t + dt
+
+    _build_moving_slab!(model, t, dt)
+
+    op_p_slab = something(model.op_p_slab)
+    op_p_end = something(model.op_p_end)
+    cap_u_slab = something(model.cap_u_slab)
+    op_u_slab = something(model.op_u_slab)
+    cap_u_end = something(model.cap_u_end)
+    Vun = something(model.Vun)
+    Vun1 = something(model.Vun1)
+
+    nt = model.layout.nt
+    nsys = nunknowns(model.layout)
+    A = spzeros(T, nsys, nsys)
+    b = zeros(T, nsys)
+    layout = model.layout
+    xfull_prev = _expand_prev_state(model, x_prev)
+
+    grad_full = op_p_slab.G + op_p_slab.H
+    size(grad_full, 1) == N * nt ||
+        throw(ArgumentError("pressure gradient rows ($(size(grad_full, 1))) must equal N*nt ($(N * nt))"))
+
+    grad = ntuple(d -> begin
+        rows = ((d - 1) * nt + 1):(d * nt)
+        gd = sparse(-grad_full[rows, :])
+        if !model.periodic[d]
+            capd = cap_u_end[d]
+            li = LinearIndices(capd.nnodes)
+            @inbounds for I in CartesianIndices(capd.nnodes)
+                if I[d] != 1
+                    continue
+                end
+                physical = true
+                for k in 1:N
+                    if I[k] == capd.nnodes[k]
+                        physical = false
+                        break
+                    end
+                end
+                physical || continue
+                II = CartesianIndex(ntuple(k -> (k == d ? I[k] + 1 : I[k]), N))
+                i = li[I]
+                j = li[II]
+                Aface = capd.buf.A[d][i]
+                if !isfinite(Aface) || iszero(Aface)
+                    continue
+                end
+                gd[i, i] = gd[i, i] + 2 * Aface
+                gd[i, j] = gd[i, j] - Aface
+            end
+        end
+        gd
+    end, N)
+
+    div_omega = ntuple(d -> begin
+        rows = ((d - 1) * nt + 1):(d * nt)
+        gp = op_p_end.G[rows, :]
+        hp = op_p_end.H[rows, :]
+        -(gp' + hp')
+    end, N)
+
+    div_gamma = ntuple(d -> begin
+        rows = ((d - 1) * nt + 1):(d * nt)
+        hp = op_p_end.H[rows, :]
+        sparse(hp')
+    end, N)
+
+    @inbounds for d in 1:N
+        opud = op_u_slab[d]
+        K = model.mu * (opud.G' * (opud.Winv * opud.G))
+        C = model.mu * (opud.G' * (opud.Winv * opud.H))
+        M1 = spdiagm(0 => model.rho .* Vun1[d])
+        M0 = spdiagm(0 => model.rho .* Vun[d])
+        Ψp = spdiagm(0 => T[psip(Vun[d][i], Vun1[d][i]) for i in 1:nt])
+        Ψm = spdiagm(0 => T[psim(Vun[d][i], Vun1[d][i]) for i in 1:nt])
+
+        A_oo = M1 + theta * (K * Ψp)
+        A_og = -(M1 - M0) + theta * (C * Ψp)
+        _insert_block!(A, layout.uomega[d], layout.uomega[d], A_oo)
+        _insert_block!(A, layout.uomega[d], layout.ugamma[d], A_og)
+        _insert_block!(A, layout.uomega[d], layout.pomega, grad[d])
+
+        tie = spdiagm(0 => ones(T, nt))
+        _insert_block!(A, layout.ugamma[d], layout.ugamma[d], tie)
+
+        uω_prev = Vector{T}(xfull_prev[layout.uomega[d]])
+        uγ_prev = Vector{T}(xfull_prev[layout.ugamma[d]])
+        rhs = (M0 - (one(T) - theta) * (K * Ψm)) * uω_prev
+        rhs .-= (one(T) - theta) .* ((C * Ψm) * uγ_prev)
+
+        f_prev = _force_values(model, cap_u_end[d], d, t)
+        f_next = _force_values(model, cap_u_end[d], d, t_next)
+        rhs .+= theta .* (cap_u_slab[d].V * f_next) .+ (one(T) - theta) .* (cap_u_slab[d].V * f_prev)
+        _insert_vec!(b, layout.uomega[d], rhs)
+
+        cut_next = _cut_values(cap_u_end[d], model.bc_cut_u[d], t_next)
+        _insert_vec!(b, layout.ugamma[d], cut_next)
+    end
+
+    @inbounds for d in 1:N
+        _insert_block!(A, layout.pomega, layout.uomega[d], div_omega[d])
+        _insert_block!(A, layout.pomega, layout.ugamma[d], div_gamma[d])
+    end
+
+    _apply_velocity_box_bc!(A, b, model, t_next)
+    _apply_pressure_box_bc!(A, b, model, t_next)
+    _apply_pressure_gauge!(A, b, model)
+
+    active_rows = _stokes_row_activity(model, A)
+    A, b = _apply_row_identity_constraints!(A, b, active_rows)
+
+    sys.A = A
+    sys.b = b
+    length(sys.x) == nsys || (sys.x = zeros(T, nsys))
+    sys.cache = nothing
+    return sys
+end
+
 function solve_steady!(
     model::StokesModelMono{N,T};
     t::T=zero(T),
@@ -1554,6 +2011,22 @@ function solve_unsteady!(
     nsys = nunknowns(model.layout)
     sys = LinearSystem(spzeros(T, nsys, nsys), zeros(T, nsys))
     assemble_unsteady!(sys, model, x_prev, t, dt; scheme=scheme)
+    solve!(sys; method=method, kwargs...)
+    return sys
+end
+
+function solve_unsteady_moving!(
+    model::MovingStokesModelMono{N,T},
+    x_prev::AbstractVector;
+    t::T=zero(T),
+    dt::T,
+    scheme=:CN,
+    method::Symbol=:direct,
+    kwargs...,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    sys = LinearSystem(spzeros(T, nsys, nsys), zeros(T, nsys))
+    assemble_unsteady_moving!(sys, model, x_prev, t, dt; scheme=scheme)
     solve!(sys; method=method, kwargs...)
     return sys
 end
@@ -1912,6 +2385,53 @@ function StokesModelMono(
         pflags,
         geom_method,
         body,
+    )
+end
+
+function MovingStokesModelMono(
+    gridp::CartesianGrid{N,T},
+    body,
+    mu::Real,
+    rho::Real;
+    force=_default_force(T, Val(N)),
+    bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
+    bc_p::Union{Nothing,BorderConditions}=nothing,
+    bc_cut_u::Union{AbstractBoundary,NTuple{N,AbstractBoundary}}=ntuple(_ -> Dirichlet(zero(T)), N),
+    gauge::AbstractPressureGauge=PinPressureGauge(),
+    strong_wall_bc::Bool=true,
+    geom_method::Symbol=:vofijul,
+) where {N,T}
+    pflags = _periodic_velocity_flags(bc_u)
+    bc_p = _validate_pressure_bc(bc_p, pflags)
+    gridu = staggered_velocity_grids(gridp)
+    nt = prod(gridp.n)
+    layout = StokesLayout(nt, Val(N))
+    bc_cut_tuple = bc_cut_u isa NTuple ? bc_cut_u : _normalize_cut_bc_tuple(bc_cut_u, Val(N))
+
+    return MovingStokesModelMono{N,T,typeof(force),typeof(body)}(
+        gridp,
+        gridu,
+        body,
+        convert(T, mu),
+        convert(T, rho),
+        force,
+        bc_u,
+        bc_p,
+        bc_cut_tuple,
+        gauge,
+        strong_wall_bc,
+        pflags,
+        geom_method,
+        layout,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
     )
 end
 

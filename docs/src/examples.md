@@ -12,6 +12,8 @@ julia --project=. examples/10_two_phase_planar_poiseuille.jl
 julia --project=. examples/11_two_phase_oscillatory_couette.jl
 julia --project=. examples/12_two_phase_viscous_drop_drag.jl
 julia --project=. examples/07_unsteady_sphere_drag.jl
+julia --project=. examples/13_unsteady_moving_body_translation.jl
+julia --project=. examples/14_unsteady_oscillating_cylinder.jl
 ```
 
 General test command:

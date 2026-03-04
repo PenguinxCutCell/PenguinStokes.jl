@@ -53,6 +53,7 @@ function all_dirichlet_bc(::Val{2})
     )
 end
 
+
 function all_dirichlet_bc(::Val{3})
     return BorderConditions(
         ; left=Dirichlet(0.0), right=Dirichlet(0.0),
@@ -997,3 +998,5 @@ end
     @test e1[2] < 2e-3
     @test e2[2] < 2e-3
 end
+
+include("moving_boundary_stokes_tests.jl")

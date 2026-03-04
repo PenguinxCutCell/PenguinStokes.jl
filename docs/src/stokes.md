@@ -55,3 +55,9 @@ Unsteady formulation
 `assemble_unsteady!` supports theta schemes (`:BE`, `:CN`, numeric `theta`) by adding mass `(rho/dt) * V` to momentum omega blocks and corresponding RHS history terms.
 
 For `StokesModelTwoPhase`, unsteady assembly applies the same theta update independently on each phase momentum block (`uomega1`, `uomega2`) while keeping interface traction rows algebraic at `t_{n+1}`.
+
+Moving embedded boundary (prescribed velocity)
+
+- `MovingStokesModelMono` supports one-phase unsteady Stokes with time-dependent level-set geometry `body(x..., t)` (or static `body(x...)`) and prescribed interface motion through `bc_cut_u`.
+- `assemble_unsteady_moving!` builds slab-integrated operators between `t_n` and `t_{n+1}` using `SpaceTimeCartesianGrid` reduction, then enforces cut-trace rows strongly at `t_{n+1}`.
+- Outer wall BC (`bc_u`, optional `bc_p`) and pressure gauge are applied on end-time capacities, and row-activity masking is computed from end-time active cells/interface support.

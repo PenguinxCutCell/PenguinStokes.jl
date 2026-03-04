@@ -12,6 +12,7 @@
 |---|---|---|---|
 | Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
 | Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
+| Models | Unsteady monophasic moving-boundary Stokes | Implemented | `MovingStokesModelMono` + `assemble_unsteady_moving!` |
 | Models | Steady two-phase fixed-interface Stokes | Implemented | `StokesModelTwoPhase` with shared `u_γ` and traction rows |
 | Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
 | BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
@@ -73,3 +74,5 @@ Key verification scripts:
 - `examples/10_two_phase_planar_poiseuille.jl`: two-layer planar Poiseuille validation (body-force equivalent, periodic streamwise) with exact piecewise-parabolic profile.
 - `examples/11_two_phase_oscillatory_couette.jl`: unsteady oscillatory two-layer Couette validation with harmonic amplitude/phase probe checks.
 - `examples/12_two_phase_viscous_drop_drag.jl`: 3D fixed spherical drop run with numerical drag compared against Hadamard–Rybczynski drag scaling.
+- `examples/13_unsteady_moving_body_translation.jl`: one-phase prescribed moving embedded boundary with oscillatory rigid translation and trace-row checks.
+- `examples/14_unsteady_oscillating_cylinder.jl`: one-phase oscillating embedded cylinder with force/torque history output.
