@@ -13,6 +13,7 @@ using PenguinSolverCore: LinearSystem, solve!
 export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge
 export StokesLayout, StokesModelMono, staggered_velocity_grids
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
+export embedded_boundary_quantities, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
 
 abstract type AbstractPressureGauge end
 
@@ -60,8 +61,10 @@ mutable struct StokesModelMono{N,T,FT,BT}
     rho::T
     force::FT
     bc_u::NTuple{N,BorderConditions}
+    bc_p::Union{Nothing,BorderConditions}
     bc_cut::AbstractBoundary
     gauge::AbstractPressureGauge
+    strong_wall_bc::Bool
     layout::StokesLayout{N}
     periodic::NTuple{N,Bool}
     geom_method::Symbol
@@ -78,6 +81,28 @@ end
 
 function _normalize_bc_tuple(bc_u::BorderConditions, ::Val{1})
     return (bc_u,)
+end
+
+function _validate_pressure_bc(
+    bc_p::Union{Nothing,BorderConditions},
+    periodic::NTuple{N,Bool},
+) where {N}
+    isnothing(bc_p) && return nothing
+    validate_borderconditions!(bc_p, N)
+    periodic_flags(bc_p, N) == periodic ||
+        throw(ArgumentError("pressure border condition periodic flags must match velocity periodic flags"))
+    return bc_p
+end
+
+function _side_pairs(N::Int)
+    if N == 1
+        return ((:left, :right),)
+    elseif N == 2
+        return ((:left, :right), (:bottom, :top))
+    elseif N == 3
+        return ((:left, :right), (:bottom, :top), (:backward, :forward))
+    end
+    throw(ArgumentError("unsupported dimension N=$N; expected 1, 2, or 3"))
 end
 
 function _periodic_velocity_flags(bc_u::NTuple{N,BorderConditions}) where {N}
@@ -306,9 +331,30 @@ function _enforce_dirichlet!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, row::Int, 
     return A, b
 end
 
+function _set_sparse_row!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    row::Int,
+    cols::AbstractVector{Int},
+    vals::AbstractVector{T},
+    rhs::T,
+) where {T}
+    length(cols) == length(vals) || throw(DimensionMismatch("row values length mismatch"))
+    @inbounds for j in 1:size(A, 2)
+        A[row, j] = zero(T)
+    end
+    @inbounds for k in eachindex(cols)
+        A[row, cols[k]] = vals[k]
+    end
+    b[row] = rhs
+    return A, b
+end
+
 function _apply_component_velocity_box_bc!(
     A::SparseMatrixCSC{T,Int},
     b::Vector{T},
+    comp::Int,
+    strong_wall_bc::Bool,
     gridp::CartesianGrid{N,T},
     cap::AssembledCapacity{N,T},
     mu::T,
@@ -319,6 +365,7 @@ function _apply_component_velocity_box_bc!(
 ) where {N,T}
     validate_borderconditions!(bc, N)
     li = LinearIndices(cap.nnodes)
+    constrained = falses(cap.ntotal)
 
     for (side, side_bc) in bc.borders
         side_bc isa AbstractBoundary ||
@@ -334,6 +381,7 @@ function _apply_component_velocity_box_bc!(
 
         for I in each_boundary_cell(cap.nnodes, side)
             i = li[I]
+            constrained[i] && continue
             Aface = cap.buf.A[d][i]
             if !isfinite(Aface) || iszero(Aface)
                 continue
@@ -345,9 +393,18 @@ function _apply_component_velocity_box_bc!(
 
             if side_bc isa Dirichlet
                 val = convert(T, eval_bc(side_bc.value, xb, t))
-                a = mu * Aface / δ
-                A[row, var_uomega[i]] = A[row, var_uomega[i]] + a
-                b[row] += a * val
+                dist = abs(x[d] - x_d)
+                tol = sqrt(eps(T)) * max(one(T), Δd)
+                collocated_wall = dist <= tol
+                if collocated_wall && (d == comp) && strong_wall_bc
+                    _enforce_dirichlet!(A, b, row, var_uomega[i], val)
+                    constrained[i] = true
+                else
+                    δeff = collocated_wall ? δ : dist
+                    a = mu * Aface / δeff
+                    A[row, var_uomega[i]] = A[row, var_uomega[i]] + a
+                    b[row] += a * val
+                end
             elseif side_bc isa Neumann
                 g = convert(T, eval_bc(side_bc.value, xb, t))
                 iszero(g) && continue
@@ -367,6 +424,8 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
         _apply_component_velocity_box_bc!(
             A,
             b,
+            d,
+            model.strong_wall_bc,
             model.gridp,
             model.cap_u[d],
             model.mu,
@@ -375,6 +434,106 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
             layout.uomega[d],
             t,
         )
+    end
+    return A, b
+end
+
+function _pressure_side_bc(model::StokesModelMono{N,T}, side::Symbol) where {N,T}
+    if isnothing(model.bc_p)
+        return Neumann(zero(T))
+    end
+    return get(model.bc_p.borders, side, Neumann(zero(T)))
+end
+
+function _pressure_neumann_rhs(
+    model::StokesModelMono{N,T},
+    side::Symbol,
+    side_bc::Neumann,
+    I::CartesianIndex{N},
+    x::SVector{N,T},
+    t::T,
+) where {N,T}
+    d, _, sign_n = side_info(side, N)
+    x_d = sign_n > 0 ? model.gridp.hc[d] : model.gridp.lc[d]
+    xb = SVector{N,T}(ntuple(k -> (k == d ? x_d : x[k]), N))
+    g_n = convert(T, eval_bc(side_bc.value, xb, t))
+    return convert(T, sign_n) * g_n
+end
+
+function _apply_pressure_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelMono{N,T}, t::T) where {N,T}
+    model.strong_wall_bc || return A, b
+    isnothing(model.bc_p) && return A, b
+    pairs = _side_pairs(N)
+    cap = model.cap_p
+    li = LinearIndices(cap.nnodes)
+    constrained = falses(cap.ntotal)
+
+    @inbounds for d in 1:N
+        model.periodic[d] && continue
+        side_lo, side_hi = pairs[d]
+        for side in (side_lo, side_hi)
+            side_bc = _pressure_side_bc(model, side)
+            side_bc isa Periodic && continue
+            Δd = abs(cap.xyz[d][2] - cap.xyz[d][1])
+            for I in each_boundary_cell(cap.nnodes, side)
+                i = li[I]
+                constrained[i] && continue
+                V = cap.buf.V[i]
+                if !(isfinite(V) && V > zero(T))
+                    continue
+                end
+                row = model.layout.pomega[i]
+                if side_bc isa Dirichlet
+                    x = cap.C_ω[i]
+                    val = convert(T, eval_bc(side_bc.value, x, t))
+                    _set_sparse_row!(
+                        A,
+                        b,
+                        row,
+                        Int[model.layout.pomega[i]],
+                        T[one(T)],
+                        val,
+                    )
+                    constrained[i] = true
+                elseif side_bc isa Neumann
+                    x = cap.C_ω[i]
+                    g = _pressure_neumann_rhs(model, side, side_bc, I, x, t)
+                    is_high = side in (:right, :top, :forward)
+                    I2 = CartesianIndex(ntuple(k -> k == d ? (is_high ? I[k] - 1 : I[k] + 1) : I[k], N))
+                    I3 = CartesianIndex(ntuple(k -> k == d ? (is_high ? I[k] - 2 : I[k] + 2) : I[k], N))
+                    use_second = true
+                    @inbounds for k in 1:N
+                        if I2[k] < 1 || I2[k] > cap.nnodes[k] || I3[k] < 1 || I3[k] > cap.nnodes[k]
+                            use_second = false
+                            break
+                        end
+                    end
+                    if use_second
+                        i2 = li[I2]
+                        i3 = li[I3]
+                        if is_high
+                            coeff = T[2, -3, 1]
+                        else
+                            coeff = T[-2, 3, -1]
+                        end
+                        cols = Int[model.layout.pomega[i], model.layout.pomega[i2], model.layout.pomega[i3]]
+                        _set_sparse_row!(A, b, row, cols, coeff, Δd * g)
+                    else
+                        i2 = li[I2]
+                        if is_high
+                            coeff = T[1, -1]
+                        else
+                            coeff = T[-1, 1]
+                        end
+                        cols = Int[model.layout.pomega[i], model.layout.pomega[i2]]
+                        _set_sparse_row!(A, b, row, cols, coeff, Δd * g)
+                    end
+                    constrained[i] = true
+                else
+                    throw(ArgumentError("pressure border condition `$side` only supports Dirichlet/Neumann/Periodic"))
+                end
+            end
+        end
     end
     return A, b
 end
@@ -498,7 +657,34 @@ function _stokes_blocks(model::StokesModelMono{N,T}) where {N,T}
 
     grad = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        -grad_full[rows, :]
+        gd = sparse(-grad_full[rows, :])
+        if !model.periodic[d]
+            capd = model.cap_u[d]
+            li = LinearIndices(capd.nnodes)
+            @inbounds for I in CartesianIndices(capd.nnodes)
+                if I[d] != 1
+                    continue
+                end
+                physical = true
+                for k in 1:N
+                    if I[k] == capd.nnodes[k]
+                        physical = false
+                        break
+                    end
+                end
+                physical || continue
+                II = CartesianIndex(ntuple(k -> (k == d ? I[k] + 1 : I[k]), N))
+                i = li[I]
+                j = li[II]
+                Aface = capd.buf.A[d][i]
+                if !isfinite(Aface) || iszero(Aface)
+                    continue
+                end
+                gd[i, i] = gd[i, i] + 2 * Aface
+                gd[i, j] = gd[i, j] - Aface
+            end
+        end
+        gd
     end, N)
 
     div_omega = ntuple(d -> begin
@@ -554,6 +740,7 @@ function assemble_steady!(sys::LinearSystem{T}, model::StokesModelMono{N,T}, t::
 
     _assemble_core!(A, b, model, blocks, t)
     _apply_velocity_box_bc!(A, b, model, t)
+    _apply_pressure_box_bc!(A, b, model, t)
     _apply_pressure_gauge!(A, b, model)
 
     active_rows = _stokes_row_activity(model, A)
@@ -623,6 +810,7 @@ function assemble_unsteady!(
     end
 
     _apply_velocity_box_bc!(A, b, model, t_next)
+    _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)
 
     active_rows = _stokes_row_activity(model, A)
@@ -664,6 +852,243 @@ function solve_unsteady!(
     return sys
 end
 
+@inline function _zero_svector(::Type{T}, ::Val{N}) where {T,N}
+    return SVector{N,T}(ntuple(_ -> zero(T), N))
+end
+
+@inline function _is_physical_index(cap::AssembledCapacity{N,T}, i::Int) where {N,T}
+    return isfinite(cap.buf.V[i]) && cap.buf.V[i] > zero(T)
+end
+
+@inline function _is_interface_index(cap::AssembledCapacity{N,T}, i::Int) where {N,T}
+    _is_physical_index(cap, i) || return false
+    Γi = cap.buf.Γ[i]
+    if !(isfinite(Γi) && Γi > zero(T))
+        return false
+    end
+    xγ = cap.C_γ[i]
+    nγ = cap.n_γ[i]
+    @inbounds for k in 1:N
+        if !(isfinite(xγ[k]) && isfinite(nγ[k]))
+            return false
+        end
+    end
+    return true
+end
+
+function _scalar_gradient(
+    op::DiffusionOps{N,T},
+    xω::AbstractVector{T},
+    xγ::AbstractVector{T},
+) where {N,T}
+    nt = length(xω)
+    length(xγ) == nt || throw(DimensionMismatch("xγ length must match xω length"))
+    g = op.Winv * (op.G * xω + op.H * xγ)
+    length(g) == N * nt || throw(DimensionMismatch("gradient length mismatch"))
+    return ntuple(d -> begin
+        rows = ((d - 1) * nt + 1):(d * nt)
+        Vector{T}(g[rows])
+    end, N)
+end
+
+function _as_origin(x0, ::Type{T}, ::Val{N}) where {T,N}
+    if isnothing(x0)
+        return _zero_svector(T, Val(N))
+    end
+    return SVector{N,T}(ntuple(k -> convert(T, x0[k]), N))
+end
+
+function _pressure_trace(
+    model::StokesModelMono{N,T},
+    pω::AbstractVector{T},
+    grad_p,
+    i::Int,
+    xγ::SVector{N,T},
+    reconstruction::Symbol,
+) where {N,T}
+    pγ = pω[i]
+    if reconstruction === :none
+        return pγ
+    elseif reconstruction === :linear
+        xω = model.cap_p.C_ω[i]
+        @inbounds for k in 1:N
+            pγ += grad_p[k][i] * (xγ[k] - xω[k])
+        end
+        return pγ
+    end
+    throw(ArgumentError("unknown pressure reconstruction `$reconstruction`; expected :none or :linear"))
+end
+
+"""
+    embedded_boundary_quantities(model, x; mu=model.mu, pressure_reconstruction=:linear, x0=nothing)
+
+Compute cut-boundary stress/traction diagnostics on the staggered velocity grids.
+
+Returns a named tuple with:
+- `stress`: stress tensors on pressure-grid cut cells
+- `traction`: traction vectors on pressure-grid cut cells
+- `force_density`: integrated force vectors (`traction * Γ`) on pressure-grid cut cells
+- `interface_indices`: active cut-cell indices on the pressure grid
+- `force`: total integrated force vector
+- `force_pressure`, `force_viscous`: pressure/viscous splits of `force`
+- `torque`: scalar in 2D or vector in 3D about `x0`
+"""
+function embedded_boundary_quantities(
+    model::StokesModelMono{N,T},
+    x::AbstractVector;
+    mu::Real=model.mu,
+    pressure_reconstruction::Symbol=:linear,
+    x0=nothing,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
+    μ = convert(T, mu)
+    origin = _as_origin(x0, T, Val(N))
+    nt = model.cap_p.ntotal
+
+    layout = model.layout
+    uω = ntuple(d -> Vector{T}(x[layout.uomega[d]]), N)
+    uγ = ntuple(d -> Vector{T}(x[layout.ugamma[d]]), N)
+    pω = Vector{T}(x[layout.pomega])
+
+    grad_u = ntuple(d -> _scalar_gradient(model.op_u[d], uω[d], uγ[d]), N)
+    pγ_seed = zeros(T, nt)
+    if pressure_reconstruction === :linear
+        pγ_seed .= pω
+    elseif pressure_reconstruction !== :none
+        throw(ArgumentError("unknown pressure reconstruction `$pressure_reconstruction`; expected :none or :linear"))
+    end
+    grad_p = _scalar_gradient(model.op_p, pω, pγ_seed)
+
+    zero_vec = _zero_svector(T, Val(N))
+    zero_sig = zero(SMatrix{N,N,T,N * N})
+
+    stress = fill(zero_sig, nt)
+    traction = fill(zero_vec, nt)
+    force_density = fill(zero_vec, nt)
+    interface_indices = Int[]
+
+    F = zeros(T, N)
+    Fp = zeros(T, N)
+    Fμ = zeros(T, N)
+
+    τ2 = zero(T)
+    τ3 = SVector{3,T}(zero(T), zero(T), zero(T))
+
+    I_N = SMatrix{N,N,T,N * N}(Matrix{T}(I, N, N))
+
+    cap = model.cap_p
+    @inbounds for i in 1:cap.ntotal
+        _is_interface_index(cap, i) || continue
+        push!(interface_indices, i)
+
+        Γi = cap.buf.Γ[i]
+        n = cap.n_γ[i]
+        xγi = cap.C_γ[i]
+        pγi = _pressure_trace(model, pω, grad_p, i, xγi, pressure_reconstruction)
+
+        G = MMatrix{N,N,T}(undef)
+        for a in 1:N, b in 1:N
+            G[a, b] = grad_u[a][b][i]
+        end
+        E2μ = μ .* (G + transpose(G))
+        σ = SMatrix{N,N,T,N * N}(E2μ) - pγi .* I_N
+
+        tvec = SVector{N,T}(ntuple(a -> begin
+            ta = zero(T)
+            for b in 1:N
+                ta += σ[a, b] * n[b]
+            end
+            ta
+        end, N))
+        tp = -pγi .* n
+        tv = tvec - tp
+        fvec = Γi .* tvec
+        fpvec = Γi .* tp
+        fvvec = Γi .* tv
+
+        stress[i] = σ
+        traction[i] = tvec
+        force_density[i] = fvec
+
+        F .+= fvec
+        Fp .+= fpvec
+        Fμ .+= fvvec
+
+        if N == 2
+            r = xγi - origin
+            τ2 += r[1] * fvec[2] - r[2] * fvec[1]
+        elseif N == 3
+            r = SVector{3,T}(xγi[1] - origin[1], xγi[2] - origin[2], xγi[3] - origin[3])
+            τ3 += cross(r, SVector{3,T}(fvec[1], fvec[2], fvec[3]))
+        end
+    end
+
+    Ftot = SVector{N,T}(Tuple(F))
+    Fptot = SVector{N,T}(Tuple(Fp))
+    Fμtot = SVector{N,T}(Tuple(Fμ))
+    torque = N == 2 ? τ2 : (N == 3 ? τ3 : nothing)
+
+    return (
+        stress=stress,
+        traction=traction,
+        force_density=force_density,
+        interface_indices=interface_indices,
+        force=Ftot,
+        force_pressure=Fptot,
+        force_viscous=Fμtot,
+        torque=torque,
+    )
+end
+
+function embedded_boundary_quantities(
+    model::StokesModelMono{N,T},
+    sys::LinearSystem{T};
+    kwargs...,
+) where {N,T}
+    return embedded_boundary_quantities(model, sys.x; kwargs...)
+end
+
+"""
+    embedded_boundary_traction(model, x; kwargs...)
+
+Return pressure-grid traction vectors on embedded boundary cells.
+"""
+function embedded_boundary_traction(model::StokesModelMono, x::AbstractVector; kwargs...)
+    return embedded_boundary_quantities(model, x; kwargs...).traction
+end
+
+function embedded_boundary_traction(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
+    return embedded_boundary_traction(model, sys.x; kwargs...)
+end
+
+"""
+    embedded_boundary_stress(model, x; kwargs...)
+
+Return pressure-grid stress tensors on embedded boundary cells.
+"""
+function embedded_boundary_stress(model::StokesModelMono, x::AbstractVector; kwargs...)
+    return embedded_boundary_quantities(model, x; kwargs...).stress
+end
+
+function embedded_boundary_stress(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
+    return embedded_boundary_stress(model, sys.x; kwargs...)
+end
+
+"""
+    integrated_embedded_force(model, x; kwargs...)
+
+Return integrated embedded-boundary force components and torque.
+"""
+function integrated_embedded_force(model::StokesModelMono, x::AbstractVector; kwargs...)
+    q = embedded_boundary_quantities(model, x; kwargs...)
+    return (force=q.force, force_pressure=q.force_pressure, force_viscous=q.force_viscous, torque=q.torque)
+end
+
+function integrated_embedded_force(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
+    return integrated_embedded_force(model, sys.x; kwargs...)
+end
+
 function StokesModelMono(
     cap_p::AssembledCapacity{N,T},
     op_p::DiffusionOps{N,T},
@@ -673,8 +1098,10 @@ function StokesModelMono(
     rho::Real;
     force=_default_force(T, Val(N)),
     bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
+    bc_p::Union{Nothing,BorderConditions}=nothing,
     bc_cut::AbstractBoundary=Dirichlet(zero(T)),
     gauge::AbstractPressureGauge=PinPressureGauge(),
+    strong_wall_bc::Bool=true,
     geom_method::Symbol=:prebuilt,
     body=nothing,
 ) where {N,T}
@@ -685,6 +1112,7 @@ function StokesModelMono(
 
     pflags = _periodic_velocity_flags(bc_u)
     pflags == periodic_flags(bc_u[1], N) || throw(ArgumentError("invalid periodic flags"))
+    bc_p = _validate_pressure_bc(bc_p, pflags)
 
     gridp = CartesianGrid(
         ntuple(d -> cap_p.xyz[d][1], N),
@@ -709,8 +1137,10 @@ function StokesModelMono(
         convert(T, rho),
         force,
         bc_u,
+        bc_p,
         bc_cut,
         gauge,
+        strong_wall_bc,
         layout,
         pflags,
         geom_method,
@@ -725,11 +1155,14 @@ function StokesModelMono(
     rho::Real;
     force=_default_force(T, Val(N)),
     bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
+    bc_p::Union{Nothing,BorderConditions}=nothing,
     bc_cut::AbstractBoundary=Dirichlet(zero(T)),
     gauge::AbstractPressureGauge=PinPressureGauge(),
+    strong_wall_bc::Bool=true,
     geom_method::Symbol=:vofijul,
 ) where {N,T}
     pflags = _periodic_velocity_flags(bc_u)
+    bc_p = _validate_pressure_bc(bc_p, pflags)
     gridu = staggered_velocity_grids(gridp)
 
     mp = geometric_moments(body, grid1d(gridp), T, nan; method=geom_method)
@@ -759,8 +1192,10 @@ function StokesModelMono(
         convert(T, rho),
         force,
         bc_u,
+        bc_p,
         bc_cut,
         gauge,
+        strong_wall_bc,
         layout,
         pflags,
         geom_method,

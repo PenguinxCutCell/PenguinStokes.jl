@@ -3,7 +3,7 @@ using LinearAlgebra
 using SparseArrays
 
 using CartesianGrids: CartesianGrid
-using PenguinBCs: BorderConditions, Dirichlet
+using PenguinBCs: BorderConditions, Dirichlet, Periodic
 using PenguinSolverCore: LinearSystem
 using PenguinStokes
 
@@ -380,6 +380,49 @@ end
     end
 end
 
+@testset "Pressure-gradient consistency on full box walls (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bc = all_dirichlet_bc(Val(2))
+    model = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+    )
+
+    blocks = PenguinStokes._stokes_blocks(model)
+    nt = model.cap_p.ntotal
+    pconst = ones(Float64, nt)
+    px = zeros(Float64, nt)
+    py = zeros(Float64, nt)
+
+    for i in 1:nt
+        x = model.cap_p.C_ω[i]
+        if isfinite(x[1])
+            px[i] = x[1]
+            py[i] = x[2]
+        end
+    end
+
+    for d in 1:2
+        gconst = blocks.grad[d] * pconst
+        gx = blocks.grad[d] * px
+        gy = blocks.grad[d] * py
+        idx = physical_active_indices(model.cap_u[d])
+        for i in idx
+            V = model.cap_u[d].buf.V[i]
+            tx = d == 1 ? -V : 0.0
+            ty = d == 2 ? -V : 0.0
+            @test isapprox(gconst[i], 0.0; atol=1e-12, rtol=0.0)
+            @test isapprox(gx[i], tx; atol=1e-12, rtol=0.0)
+            @test isapprox(gy[i], ty; atol=1e-12, rtol=0.0)
+        end
+    end
+end
+
 @testset "MMS box convergence + pressure/divergence diagnostics (2D)" begin
     bcx, bcy = mms_box_bcs()
     ns = (17, 33, 65)
@@ -506,5 +549,136 @@ end
     pidx = pressure_active_indices(model, sys.A)
     if !isempty(pidx)
         @test maximum(abs, p[pidx]) < 1e-9
+    end
+end
+
+@testset "Embedded boundary force/stress utilities (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (41, 41))
+    xc, yc, r = 0.5, 0.5, 0.2
+    body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - r
+
+    bc = all_dirichlet_bc(Val(2))
+    model = StokesModelMono(
+        grid,
+        body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+    )
+
+    nsys = last(model.layout.pomega)
+    x = zeros(Float64, nsys)
+    p = view(x, model.layout.pomega)
+    p .= 1.0
+
+    q = embedded_boundary_quantities(model, x; pressure_reconstruction=:none, x0=(xc, yc))
+    fint = integrated_embedded_force(model, x; pressure_reconstruction=:none, x0=(xc, yc))
+
+    @test !isempty(q.interface_indices)
+
+    @test isapprox(norm(q.force_viscous), 0.0; atol=1e-12, rtol=0.0)
+    @test isapprox(norm(q.force), 0.0; atol=5e-3, rtol=0.0)
+    @test isapprox(norm(q.force - (q.force_pressure + q.force_viscous)), 0.0; atol=1e-12, rtol=0.0)
+
+    @test q.force == fint.force
+    @test q.force_pressure == fint.force_pressure
+    @test q.force_viscous == fint.force_viscous
+
+    for i in q.interface_indices
+        @test all(isfinite, q.traction[i])
+        @test all(isfinite, q.force_density[i])
+    end
+    @test isfinite(q.torque)
+end
+
+@testset "Embedded boundary pressure/viscous consistency (2D periodic)" begin
+    xc, yc, r = 0.5, 0.5, 0.2
+    solid_area = pi * r^2
+    ns = (33, 65, 129)
+    err_none = Float64[]
+    err_lin = Float64[]
+
+    bcper = BorderConditions(
+        ; left=Periodic(), right=Periodic(),
+        bottom=Periodic(), top=Periodic(),
+    )
+    body(x, y) = r - sqrt((x - xc)^2 + (y - yc)^2)
+
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        model = StokesModelMono(
+            grid,
+            body,
+            1.0,
+            1.0;
+            bc_u=(bcper, bcper),
+            bc_cut=Dirichlet(0.0),
+            force=(0.0, 0.0),
+        )
+
+        nt = model.cap_p.ntotal
+        nsys = last(model.layout.pomega)
+
+        # Sanity: H*1 has zero global resultant on closed embedded boundary.
+        h1 = model.op_p.H * ones(Float64, nt)
+        @test abs(sum(h1[1:nt])) < 1e-12
+        @test abs(sum(h1[(nt + 1):(2 * nt)])) < 1e-12
+
+        # Sanity: geometric closure Σ Γ n ≈ 0 on closed interface.
+        gsum = zeros(2)
+        for i in 1:nt
+            V = model.cap_p.buf.V[i]
+            Γ = model.cap_p.buf.Γ[i]
+            if isfinite(V) && V > 0.0 && isfinite(Γ) && Γ > 0.0
+                gsum .+= Γ .* collect(model.cap_p.n_γ[i])
+            end
+        end
+        @test norm(gsum) < 1e-12
+
+        # A1: constant pressure -> zero net pressure force.
+        x_const = zeros(Float64, nsys)
+        p_const = view(x_const, model.layout.pomega)
+        p_const .= 1.0
+        q_const = embedded_boundary_quantities(model, x_const; pressure_reconstruction=:none)
+        @test norm(q_const.force_pressure) < 1e-10
+        @test norm(q_const.force_viscous) < 1e-12
+
+        # A2: linear pressure p=x (periodic outer box) -> |F_x| ≈ area(solid), F_y ≈ 0.
+        x_lin = zeros(Float64, nsys)
+        p_lin = view(x_lin, model.layout.pomega)
+        for i in 1:nt
+            xω = model.cap_p.C_ω[i]
+            if isfinite(xω[1])
+                p_lin[i] = xω[1]
+            end
+        end
+        q_none = embedded_boundary_quantities(model, x_lin; pressure_reconstruction=:none)
+        q_lin = embedded_boundary_quantities(model, x_lin; pressure_reconstruction=:linear)
+        @test abs(q_none.force_pressure[2]) < 1e-8
+        @test abs(q_lin.force_pressure[2]) < 1e-8
+        push!(err_none, abs(abs(q_none.force_pressure[1]) - solid_area))
+        push!(err_lin, abs(abs(q_lin.force_pressure[1]) - solid_area))
+        @test err_lin[end] <= err_none[end] + 5e-3
+
+        # B (robust): constant velocity field -> zero viscous force.
+        x_vel = zeros(Float64, nsys)
+        view(x_vel, model.layout.uomega[1]) .= 1.23
+        view(x_vel, model.layout.uomega[2]) .= -0.7
+        view(x_vel, model.layout.ugamma[1]) .= 1.23
+        view(x_vel, model.layout.ugamma[2]) .= -0.7
+        q_vel = embedded_boundary_quantities(model, x_vel; pressure_reconstruction=:none)
+        @test norm(q_vel.force_viscous) < 1e-10
+    end
+
+    @test err_none[2] < err_none[1]
+    @test err_none[3] < err_none[2]
+    @test err_lin[2] < err_lin[1]
+    @test err_lin[3] < err_lin[2]
+
+    for k in 1:2
+        ord_lin = log(err_lin[k] / err_lin[k + 1]) / log(2)
+        @test ord_lin > 0.7
     end
 end
