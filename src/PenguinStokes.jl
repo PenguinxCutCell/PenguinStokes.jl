@@ -7,7 +7,7 @@ using StaticArrays
 using CartesianGeometry: GeometricMoments, geometric_moments, nan
 using CartesianGrids: CartesianGrid, SpaceTimeCartesianGrid, grid1d, meshsize
 using CartesianOperators: AssembledCapacity, DiffusionOps, assembled_capacity, each_boundary_cell, periodic_flags, side_info
-using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, eval_bc, validate_borderconditions!
+using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, Symmetry, eval_bc, validate_borderconditions!
 using PenguinSolverCore: LinearSystem, solve!
 
 export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge
@@ -207,6 +207,12 @@ end
 @inline _is_stokes_traction_bc(bc::AbstractBoundary) =
     bc isa Traction || bc isa PressureOutlet || bc isa DoNothing
 
+@inline _is_stokes_symmetry_bc(bc::AbstractBoundary) =
+    bc isa Symmetry
+
+@inline _is_stokes_side_vector_bc(bc::AbstractBoundary) =
+    _is_stokes_traction_bc(bc) || _is_stokes_symmetry_bc(bc)
+
 @inline _is_scalar_velocity_bc(bc::AbstractBoundary) =
     bc isa Dirichlet || bc isa Neumann || bc isa Periodic
 
@@ -227,7 +233,25 @@ function _side_uses_traction_bc(
     return any(_is_stokes_traction_bc, side_bcs)
 end
 
-function _pressure_side_conflicts_with_traction(
+function _side_uses_symmetry_bc(
+    bc_u::NTuple{N,BorderConditions},
+    side::Symbol,
+    ::Type{T},
+) where {N,T}
+    side_bcs = _side_velocity_bcs(bc_u, side, T)
+    return any(_is_stokes_symmetry_bc, side_bcs)
+end
+
+function _side_uses_vector_bc(
+    bc_u::NTuple{N,BorderConditions},
+    side::Symbol,
+    ::Type{T},
+) where {N,T}
+    side_bcs = _side_velocity_bcs(bc_u, side, T)
+    return any(_is_stokes_side_vector_bc, side_bcs)
+end
+
+function _pressure_side_conflicts_with_vector_bc(
     bc_p::Union{Nothing,BorderConditions},
     side::Symbol,
 )
@@ -247,21 +271,37 @@ function _validate_stokes_box_bcs!(
         for side in (side_lo, side_hi)
             side_bcs = _side_velocity_bcs(bc_u, side, T)
             traction_mask = ntuple(comp -> _is_stokes_traction_bc(side_bcs[comp]), N)
+            symmetry_mask = ntuple(comp -> _is_stokes_symmetry_bc(side_bcs[comp]), N)
+            vector_mask = ntuple(comp -> _is_stokes_side_vector_bc(side_bcs[comp]), N)
             any_traction = any(traction_mask)
+            any_symmetry = any(symmetry_mask)
+            any_vector = any(vector_mask)
 
             for comp in 1:N
                 bc = side_bcs[comp]
-                (_is_scalar_velocity_bc(bc) || _is_stokes_traction_bc(bc)) ||
+                (_is_scalar_velocity_bc(bc) || _is_stokes_side_vector_bc(bc)) ||
                     throw(ArgumentError("unsupported velocity boundary type $(typeof(bc)) on side `$side`"))
             end
 
-            any_traction || continue
-            all(traction_mask) ||
-                throw(ArgumentError("traction-type Stokes BC on side `$side` must be set on all velocity components"))
+            if any_symmetry
+                all(symmetry_mask) ||
+                    throw(ArgumentError("Symmetry is a side-level Stokes BC and must be set on all velocity components of side `$side`"))
+                any_traction &&
+                    throw(ArgumentError("side `$side` cannot mix Symmetry with traction-type BCs"))
+            end
+
+            if any_traction
+                all(traction_mask) ||
+                    throw(ArgumentError("traction-type Stokes BC on side `$side` must be set on all velocity components"))
+                any_symmetry &&
+                    throw(ArgumentError("side `$side` cannot mix traction-type BCs with Symmetry"))
+            end
+
+            any_vector || continue
             periodic[d] &&
-                throw(ArgumentError("traction-type Stokes BC on side `$side` is incompatible with periodic boundaries"))
-            _pressure_side_conflicts_with_traction(bc_p, side) &&
-                throw(ArgumentError("pressure BC on side `$side` conflicts with traction-type velocity BC"))
+                throw(ArgumentError("side-level Stokes BC on side `$side` is incompatible with periodic boundaries"))
+            _pressure_side_conflicts_with_vector_bc(bc_p, side) &&
+                throw(ArgumentError("pressure BC on side `$side` conflicts with side-level Stokes velocity BC"))
         end
     end
     return nothing
@@ -1231,6 +1271,162 @@ function _apply_traction_box_bc!(
     return locked_rows
 end
 
+function _apply_symmetry_box_bc_block!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    gridp::CartesianGrid{N,T},
+    cap_u::NTuple{N,AssembledCapacity{N,T}},
+    μ::T,
+    bc_u::NTuple{N,BorderConditions},
+    row_uomega::NTuple{N,UnitRange{Int}},
+    periodic::NTuple{N,Bool},
+    t::T,
+    locked_rows::BitVector,
+) where {N,T}
+    pairs = _side_pairs(N)
+    for d in 1:N
+        periodic[d] && continue
+        side_lo, side_hi = pairs[d]
+        for side in (side_lo, side_hi)
+            _side_uses_symmetry_bc(bc_u, side, T) || continue
+            side_bcs = _side_velocity_bcs(bc_u, side, T)
+            all(bc -> bc isa Symmetry, side_bcs) || continue
+
+            _, is_high, _ = side_info(side, N)
+            x_d = is_high ? gridp.hc[d] : gridp.lc[d]
+
+            @inbounds for comp in 1:N
+                cap_comp = cap_u[comp]
+                cap_d = cap_u[d]
+                cap_d.nnodes == cap_comp.nnodes ||
+                    throw(ArgumentError("velocity capacities must share nnodes for symmetry coupling"))
+                li = LinearIndices(cap_comp.nnodes)
+                for I in each_boundary_cell(cap_comp.nnodes, side)
+                    i = li[I]
+                    Vi = cap_comp.buf.V[i]
+                    Aface = cap_comp.buf.A[d][i]
+                    if !(isfinite(Vi) && Vi > zero(T) && isfinite(Aface) && Aface > zero(T))
+                        continue
+                    end
+
+                    row = row_uomega[comp][i]
+                    locked_rows[row] && continue
+
+                    if comp == d
+                        _enforce_dirichlet!(A, b, row, row_uomega[comp][i], zero(T))
+                        locked_rows[row] = true
+                        continue
+                    end
+
+                    cols = Int[]
+                    vals = T[]
+                    ncols, nvals = _normal_derivative_terms_halfshifted(cap_comp, row_uomega[comp], I, d, is_high)
+                    _append_scaled_terms!(cols, vals, ncols, nvals, μ)
+                    tcols, tvals = _tangential_derivative_terms_on_boundary_layer(
+                        cap_d,
+                        row_uomega[d],
+                        cap_comp,
+                        I,
+                        d,
+                        is_high,
+                        comp,
+                        x_d,
+                    )
+                    _append_scaled_terms!(cols, vals, tcols, tvals, μ)
+                    isempty(cols) && continue
+
+                    _set_sparse_row!(A, b, row, cols, vals, zero(T))
+                    locked_rows[row] = true
+                end
+            end
+        end
+    end
+    return A, b
+end
+
+function _apply_symmetry_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::StokesModelMono{N,T},
+    t::T,
+    locked_rows::Union{Nothing,BitVector}=nothing,
+) where {N,T}
+    locks = isnothing(locked_rows) ? falses(size(A, 1)) : locked_rows
+    _apply_symmetry_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        model.cap_u,
+        model.mu,
+        model.bc_u,
+        model.layout.uomega,
+        model.periodic,
+        t,
+        locks,
+    )
+    return locks
+end
+
+function _apply_symmetry_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::StokesModelTwoPhase{N,T},
+    t::T,
+    locked_rows::Union{Nothing,BitVector}=nothing,
+) where {N,T}
+    locks = isnothing(locked_rows) ? falses(size(A, 1)) : locked_rows
+    _apply_symmetry_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        model.cap_u1,
+        model.mu1,
+        model.bc_u,
+        model.layout.uomega1,
+        model.periodic,
+        t,
+        locks,
+    )
+    _apply_symmetry_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        model.cap_u2,
+        model.mu2,
+        model.bc_u,
+        model.layout.uomega2,
+        model.periodic,
+        t,
+        locks,
+    )
+    return locks
+end
+
+function _apply_symmetry_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::MovingStokesModelMono{N,T},
+    t::T,
+    locked_rows::Union{Nothing,BitVector}=nothing,
+) where {N,T}
+    isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
+    cap_u_end = something(model.cap_u_end)
+    locks = isnothing(locked_rows) ? falses(size(A, 1)) : locked_rows
+    _apply_symmetry_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        cap_u_end,
+        model.mu,
+        model.bc_u,
+        model.layout.uomega,
+        model.periodic,
+        t,
+        locks,
+    )
+    return locks
+end
+
 function _apply_component_velocity_box_bc!(
     A::SparseMatrixCSC{T,Int},
     b::Vector{T},
@@ -1252,7 +1448,7 @@ function _apply_component_velocity_box_bc!(
     for (side, side_bc) in bc.borders
         side_bc isa AbstractBoundary ||
             throw(ArgumentError("velocity border condition `$side` only supports valid boundary types"))
-        _is_stokes_traction_bc(side_bc) && continue
+        _is_stokes_side_vector_bc(side_bc) && continue
         d, is_high, _ = side_info(side, N)
         side_bc isa Periodic && continue
 
@@ -1439,7 +1635,7 @@ function _apply_pressure_box_bc_block!(
         periodic[d] && continue
         side_lo, side_hi = pairs[d]
         for side in (side_lo, side_hi)
-            _side_uses_traction_bc(bc_u, side, T) && continue
+            _side_uses_vector_bc(bc_u, side, T) && continue
             side_bc = _pressure_side_bc(bc_p, side, T)
             side_bc isa Periodic && continue
             Δd = abs(cap.xyz[d][2] - cap.xyz[d][1])
@@ -2225,6 +2421,7 @@ function assemble_steady!(sys::LinearSystem{T}, model::StokesModelTwoPhase{N,T},
 
     _assemble_core!(A, b, model, blocks, t)
     traction_locked_rows = _apply_traction_box_bc!(A, b, model, t)
+    _apply_symmetry_box_bc!(A, b, model, t, traction_locked_rows)
     _apply_velocity_box_bc!(A, b, model, t; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t)
     _apply_pressure_gauge!(A, b, model)
@@ -2309,6 +2506,7 @@ function assemble_unsteady!(
 
     _assemble_interface_traction_rows!(A, b, model, blocks, t_next)
     traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
+    _apply_symmetry_box_bc!(A, b, model, t_next, traction_locked_rows)
     _apply_velocity_box_bc!(A, b, model, t_next; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)
@@ -2331,6 +2529,7 @@ function assemble_steady!(sys::LinearSystem{T}, model::StokesModelMono{N,T}, t::
 
     _assemble_core!(A, b, model, blocks, t)
     traction_locked_rows = _apply_traction_box_bc!(A, b, model, t)
+    _apply_symmetry_box_bc!(A, b, model, t, traction_locked_rows)
     _apply_velocity_box_bc!(A, b, model, t; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t)
     _apply_pressure_gauge!(A, b, model)
@@ -2402,6 +2601,7 @@ function assemble_unsteady!(
     end
 
     traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
+    _apply_symmetry_box_bc!(A, b, model, t_next, traction_locked_rows)
     _apply_velocity_box_bc!(A, b, model, t_next; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)
@@ -2533,6 +2733,7 @@ function assemble_unsteady_moving!(
     end
 
     traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
+    _apply_symmetry_box_bc!(A, b, model, t_next, traction_locked_rows)
     _apply_velocity_box_bc!(A, b, model, t_next; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)

@@ -52,11 +52,19 @@ Outer-box Stokes traction BCs (`bc_u`)
 - `PressureOutlet(pout)` for `σn = -pout*n`,
 - `DoNothing()` for homogeneous traction `σn = 0`,
 - `Traction(t)` for prescribed full traction vector `σn = t`.
+- `Symmetry()` for axis-aligned free-slip/symmetry walls:
+  - normal velocity: `u⋅n = 0`,
+  - tangential traction: `(I - n⊗n)σn = 0`.
 - Traction BCs are enforced with side-based row overwrite of boundary-adjacent momentum rows, including:
 - pressure coupling in normal traction rows,
 - symmetric-gradient cross coupling in tangential traction rows (`∂ₙu_t + ∂_t u_n`).
+- Symmetry sides are also assembled with side-based row overwrite:
+  - the normal component row is set strongly to zero velocity,
+  - tangential component rows enforce homogeneous tangential traction.
 - A traction side must be declared on all velocity components for that side.
 - `bc_p` is not allowed on traction sides (pressure is already part of the traction law there).
+- A symmetry side must also be declared on all velocity components for that side.
+- `bc_p` is not allowed on symmetry sides.
 
 Embedded-boundary force and stress post-processing
 

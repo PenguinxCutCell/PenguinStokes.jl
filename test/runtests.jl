@@ -4,7 +4,7 @@ using SparseArrays
 using StaticArrays: SMatrix, SVector
 
 using CartesianGrids: CartesianGrid
-using PenguinBCs: BorderConditions, Dirichlet, DoNothing, Neumann, Periodic, PressureOutlet, Traction
+using PenguinBCs: BorderConditions, Dirichlet, DoNothing, Neumann, Periodic, PressureOutlet, Symmetry, Traction
 using PenguinSolverCore: LinearSystem
 using PenguinStokes
 
@@ -392,6 +392,13 @@ function velocity_pressure_metrics(model, sys, ufun, vfun, pfun)
     return (uL2=sqrt(eu2 / wu), vL2=sqrt(ev2 / wv), pL2=sqrt(ep2 / wp))
 end
 
+function _is_identity_row(A, b, row; atol=1e-14)
+    r = Array(A[row, :])
+    nz = findall(x -> abs(x) > atol, r)
+    return length(nz) == 1 && nz[1] == row && isapprox(r[row], 1.0; atol=atol, rtol=0.0) &&
+           isapprox(b[row], 0.0; atol=atol, rtol=0.0)
+end
+
 function poly_box_velocity_metrics(model, sys)
     u = sys.x[model.layout.uomega[1]]
     v = sys.x[model.layout.uomega[2]]
@@ -739,11 +746,129 @@ end
     @test isapprox(sys.b[ruy], 0.0; atol=1e-12, rtol=0.0)
 end
 
-function _is_identity_row(A, b, row; atol=1e-14)
-    r = Array(A[row, :])
-    nz = findall(x -> abs(x) > atol, r)
-    return length(nz) == 1 && nz[1] == row && isapprox(r[row], 1.0; atol=atol, rtol=0.0) &&
-           isapprox(b[row], 0.0; atol=atol, rtol=0.0)
+@testset "Outer-box symmetry BC validation rules (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+
+    # Symmetry must be set on all velocity components of the side.
+    bcx_partial = BorderConditions(
+        ; left=Dirichlet(0.0), right=Symmetry(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_partial = BorderConditions(
+        ; left=Dirichlet(0.0), right=Neumann(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    @test_throws ArgumentError StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx_partial, bcy_partial),
+    )
+
+    # Symmetry and traction cannot be mixed on the same side.
+    bcx_mix = BorderConditions(
+        ; left=Dirichlet(0.0), right=Symmetry(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_mix = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    @test_throws ArgumentError StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx_mix, bcy_mix),
+    )
+
+    # Pressure BC cannot be imposed on a symmetry side.
+    bcx_sym = BorderConditions(
+        ; left=Dirichlet(0.0), right=Symmetry(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_sym = BorderConditions(
+        ; left=Dirichlet(0.0), right=Symmetry(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcp_bad = BorderConditions(; right=Neumann(0.0))
+    @test_throws ArgumentError StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx_sym, bcy_sym),
+        bc_p=bcp_bad,
+    )
+end
+
+@testset "Outer-box right symmetry rows enforce mixed free-slip form (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bcx = BorderConditions(
+        ; left=Dirichlet(0.0), right=Symmetry(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet(0.0), right=Symmetry(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    model = StokesModelMono(grid, full_body, 1.0, 1.0; bc_u=(bcx, bcy), force=(0.0, 0.0))
+    nsys = last(model.layout.pomega)
+    sys = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(sys, model, 0.0)
+
+    liux = LinearIndices(model.cap_u[1].nnodes)
+    liuy = LinearIndices(model.cap_u[2].nnodes)
+    I = CartesianIndex(model.cap_u[1].nnodes[1] - 1, 4)
+    iux = liux[I]
+    iuy = liuy[I]
+    row_ux = model.layout.uomega[1][iux]
+    row_uy = model.layout.uomega[2][iuy]
+
+    # Normal component (u on right side) is strongly set to zero.
+    @test _is_identity_row(sys.A, sys.b, row_ux)
+
+    # Tangential symmetry row has no direct pressure term and includes cross-coupling.
+    prow = Array(sys.A[row_uy, model.layout.pomega])
+    @test maximum(abs, prow) == 0.0
+    @test any(abs.(Array(sys.A[row_uy, model.layout.uomega[1]])) .> 0.0)
+    @test any(abs.(Array(sys.A[row_uy, model.layout.uomega[2]])) .> 0.0)
+    @test isapprox(sys.b[row_uy], 0.0; atol=1e-12, rtol=0.0)
+end
+
+@testset "Outer-box top symmetry rows enforce mixed free-slip form (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bcx = BorderConditions(
+        ; left=Dirichlet(0.0), right=Dirichlet(0.0),
+        bottom=Dirichlet(0.0), top=Symmetry(),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet(0.0), right=Dirichlet(0.0),
+        bottom=Dirichlet(0.0), top=Symmetry(),
+    )
+    model = StokesModelMono(grid, full_body, 1.0, 1.0; bc_u=(bcx, bcy), force=(0.0, 0.0))
+    nsys = last(model.layout.pomega)
+    sys = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(sys, model, 0.0)
+
+    liux = LinearIndices(model.cap_u[1].nnodes)
+    liuy = LinearIndices(model.cap_u[2].nnodes)
+    I = CartesianIndex(4, model.cap_u[2].nnodes[2] - 1)
+    iux = liux[I]
+    iuy = liuy[I]
+    row_ux = model.layout.uomega[1][iux]
+    row_uy = model.layout.uomega[2][iuy]
+
+    # Normal component (v on top side) is strongly set to zero.
+    @test _is_identity_row(sys.A, sys.b, row_uy)
+
+    # Tangential symmetry row has no direct pressure term and includes cross-coupling.
+    prow = Array(sys.A[row_ux, model.layout.pomega])
+    @test maximum(abs, prow) == 0.0
+    @test any(abs.(Array(sys.A[row_ux, model.layout.uomega[1]])) .> 0.0)
+    @test any(abs.(Array(sys.A[row_ux, model.layout.uomega[2]])) .> 0.0)
+    @test isapprox(sys.b[row_ux], 0.0; atol=1e-12, rtol=0.0)
 end
 
 function _find_gauge_row(model, sys)
@@ -1103,6 +1228,71 @@ end
         @test ord_u > 1.7
         @test ord_v > 1.7
         @test ord_p > 0.45
+    end
+end
+
+@testset "MMS convergence with top Symmetry (2D)" begin
+    μ = 1.0
+    ns = (17, 33, 65)
+    hs = Float64[]
+    eu = Float64[]
+    ev = Float64[]
+
+    g(y) = y^2 - 3y^3 + 3y^4 - y^5
+    gp(y) = 2y - 9y^2 + 12y^3 - 5y^4
+    gpp(y) = 2 - 18y + 36y^2 - 20y^3
+    gppp(y) = -18 + 72y - 60y^2
+
+    uex(x, y) = sin(pi * x) * gp(y)
+    vex(x, y) = -pi * cos(pi * x) * g(y)
+
+    lapu(x, y) = sin(pi * x) * (gppp(y) - pi^2 * gp(y))
+    lapv(x, y) = pi * cos(pi * x) * (pi^2 * g(y) - gpp(y))
+    fx(x, y) = -μ * lapu(x, y)
+    fy(x, y) = -μ * lapv(x, y)
+
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        bcx = BorderConditions(
+            ; left=Dirichlet((x, y) -> uex(x, y)),
+            right=Dirichlet((x, y) -> uex(x, y)),
+            bottom=Dirichlet((x, y) -> uex(x, y)),
+            top=Symmetry(),
+        )
+        bcy = BorderConditions(
+            ; left=Dirichlet((x, y) -> vex(x, y)),
+            right=Dirichlet((x, y) -> vex(x, y)),
+            bottom=Dirichlet((x, y) -> vex(x, y)),
+            top=Symmetry(),
+        )
+        model = StokesModelMono(
+            grid,
+            full_body,
+            μ,
+            1.0;
+            bc_u=(bcx, bcy),
+            bc_p=nothing,
+            bc_cut=Dirichlet(0.0),
+            force=(fx, fy),
+            gauge=MeanPressureGauge(),
+        )
+        sys = solve_steady!(model)
+        @test norm(sys.A * sys.x - sys.b) < 1e-8
+        m = velocity_pressure_metrics(model, sys, uex, vex, (x, y) -> 0.0)
+        push!(hs, 1.0 / (n - 1))
+        push!(eu, m.uL2)
+        push!(ev, m.vL2)
+    end
+
+    @test eu[2] < eu[1]
+    @test eu[3] < eu[2]
+    @test ev[2] < ev[1]
+    @test ev[3] < ev[2]
+    for k in 1:2
+        ord_u = log(eu[k] / eu[k + 1]) / log(hs[k] / hs[k + 1])
+        ord_v = log(ev[k] / ev[k + 1]) / log(hs[k] / hs[k + 1])
+        @test ord_u > 1.7
+        @test ord_v > 1.6
     end
 end
 

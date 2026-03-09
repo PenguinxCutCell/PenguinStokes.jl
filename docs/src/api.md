@@ -21,7 +21,10 @@ Notes
 - Velocity boundary conditions are passed component-wise through `bc_u`.
 - Outer-box Stokes traction laws are available through `PenguinBCs` side entries in `bc_u`:
 - `PressureOutlet(pout)`, `DoNothing()`, and `Traction(t)`.
+- Outer-box Stokes symmetry/free-slip walls are available through `Symmetry()`.
 - Traction-type BCs must be set on all velocity components for a given side.
+- Symmetry must also be set on all velocity components for a given side.
+- `bc_p` cannot be imposed on traction or symmetry sides.
 - Pressure gauge remains required; optional wall constraints can be passed through `bc_p`.
 - `PinPressureGauge(index=...)` pins that same pressure DOF row/column.
 - `MeanPressureGauge()` uses active-cell-volume weights for the zero-mean constraint.
