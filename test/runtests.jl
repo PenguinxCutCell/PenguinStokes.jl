@@ -59,6 +59,26 @@ tan_lap_v(x, y) = 4x
 tan_fx(x, y) = -MMS_MU * tan_lap_u(x, y)
 tan_fy(x, y) = -MMS_MU * tan_lap_v(x, y)
 
+# Matched outlet MMS for PressureOutlet/DoNothing:
+# streamfunction ψ = (1-x)^3 g(y), p = p_out + (1-x)^2 s(y)
+# so on x=1: u=v=ux=0 and (vx + uy)=0, giving exact outlet traction (-p_out, 0).
+po_g(y) = y^2 * (1 - y)^2
+po_gp(y) = 2y - 6y^2 + 4y^3
+po_gpp(y) = 2 - 12y + 12y^2
+po_g3(y) = -12 + 24y
+po_s(y) = sin(pi * y)
+po_sp(y) = pi * cos(pi * y)
+
+po_u(x, y) = (1 - x)^3 * po_gp(y)
+po_v(x, y) = 3 * (1 - x)^2 * po_g(y)
+po_p(x, y; pout=0.0) = pout + (1 - x)^2 * po_s(y)
+po_lap_u(x, y) = 6 * (1 - x) * po_gp(y) + (1 - x)^3 * po_g3(y)
+po_lap_v(x, y) = 6 * po_g(y) + 3 * (1 - x)^2 * po_gpp(y)
+po_px(x, y) = -2 * (1 - x) * po_s(y)
+po_py(x, y) = (1 - x)^2 * po_sp(y)
+po_fx(x, y) = -MMS_MU * po_lap_u(x, y) - po_px(x, y)
+po_fy(x, y) = -MMS_MU * po_lap_v(x, y) - po_py(x, y)
+
 function all_dirichlet_bc(::Val{1})
     return BorderConditions(; left=Dirichlet(0.0), right=Dirichlet(0.0))
 end
@@ -325,6 +345,51 @@ function mms_box_metrics(model, sys)
         pmin=minimum(pn),
         pmax=maximum(pn),
     )
+end
+
+function velocity_pressure_metrics(model, sys, ufun, vfun, pfun)
+    u = sys.x[model.layout.uomega[1]]
+    v = sys.x[model.layout.uomega[2]]
+    p = sys.x[model.layout.pomega]
+
+    eu2 = 0.0
+    ev2 = 0.0
+    wu = 0.0
+    wv = 0.0
+    for i in 1:model.cap_u[1].ntotal
+        V = model.cap_u[1].buf.V[i]
+        if isfinite(V) && V > 0.0
+            x = model.cap_u[1].C_ω[i]
+            eu2 += V * (u[i] - ufun(x[1], x[2]))^2
+            wu += V
+        end
+    end
+    for i in 1:model.cap_u[2].ntotal
+        V = model.cap_u[2].buf.V[i]
+        if isfinite(V) && V > 0.0
+            x = model.cap_u[2].C_ω[i]
+            ev2 += V * (v[i] - vfun(x[1], x[2]))^2
+            wv += V
+        end
+    end
+
+    pidx = pressure_active_indices(model, sys.A)
+    pn = [p[i] for i in pidx]
+    pexact = [begin
+        x = model.cap_p.C_ω[i]
+        pfun(x[1], x[2])
+    end for i in pidx]
+    shift = sum(pn .- pexact) / length(pn)
+
+    ep2 = 0.0
+    wp = 0.0
+    for (k, i) in enumerate(pidx)
+        V = model.cap_p.buf.V[i]
+        ep2 += V * ((pn[k] - shift) - pexact[k])^2
+        wp += V
+    end
+
+    return (uL2=sqrt(eu2 / wu), vL2=sqrt(ev2 / wv), pL2=sqrt(ep2 / wp))
 end
 
 function poly_box_velocity_metrics(model, sys)
@@ -674,6 +739,134 @@ end
     @test isapprox(sys.b[ruy], 0.0; atol=1e-12, rtol=0.0)
 end
 
+function _is_identity_row(A, b, row; atol=1e-14)
+    r = Array(A[row, :])
+    nz = findall(x -> abs(x) > atol, r)
+    return length(nz) == 1 && nz[1] == row && isapprox(r[row], 1.0; atol=atol, rtol=0.0) &&
+           isapprox(b[row], 0.0; atol=atol, rtol=0.0)
+end
+
+function _find_gauge_row(model, sys)
+    prow = model.layout.pomega
+    row = 0
+    local_idx = 0
+    best_nz = 0
+    up_to = first(prow) - 1
+    for i in 1:model.cap_p.ntotal
+        r = prow[i]
+        if up_to > 0 && maximum(abs, Array(sys.A[r, 1:up_to])) > 0.0
+            continue
+        end
+        pvals = Array(sys.A[r, prow])
+        nz = count(!iszero, pvals)
+        if nz > best_nz
+            best_nz = nz
+            row = r
+            local_idx = i
+        end
+    end
+    return local_idx, row, best_nz
+end
+
+@testset "Pressure gauge pin row uses selected DOF (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bc = all_dirichlet_bc(Val(2))
+    m_ref = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+        gauge=MeanPressureGauge(),
+    )
+    nsys = last(m_ref.layout.pomega)
+    s_ref = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(s_ref, m_ref, 0.0)
+    pidx = pressure_active_indices(m_ref, s_ref.A)
+    @test length(pidx) >= 2
+
+    i1 = pidx[1]
+    i2 = pidx[2]
+
+    m1 = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+        gauge=PinPressureGauge(index=i1),
+    )
+    m2 = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+        gauge=PinPressureGauge(index=i2),
+    )
+
+    s1 = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    s2 = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(s1, m1, 0.0)
+    assemble_steady!(s2, m2, 0.0)
+
+    row1 = m1.layout.pomega[i1]
+    row2 = m2.layout.pomega[i2]
+
+    @test _is_identity_row(s1.A, s1.b, row1)
+    @test !_is_identity_row(s2.A, s2.b, row1)
+    @test _is_identity_row(s2.A, s2.b, row2)
+    @test !_is_identity_row(s1.A, s1.b, row2)
+end
+
+@testset "Mean pressure gauge uses active-volume weights (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (33, 33))
+    circle_body(x, y) = sqrt((x - 0.5)^2 + (y - 0.5)^2) - 0.2
+    bc = all_dirichlet_bc(Val(2))
+    model = StokesModelMono(
+        grid,
+        circle_body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+        gauge=MeanPressureGauge(),
+    )
+
+    nsys = last(model.layout.pomega)
+    sys = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(sys, model, 0.0)
+
+    local_row, row, nnz_p = _find_gauge_row(model, sys)
+    @test local_row > 0
+    @test nnz_p > 1
+
+    pactive = PenguinStokes._pressure_activity(model.cap_p)
+    active_idx = findall(pactive)
+    @test !isempty(active_idx)
+
+    prow = model.layout.pomega
+    coeff_all = Array(sys.A[row, prow])
+    coeff = [coeff_all[i] for i in active_idx]
+    vols = [model.cap_p.buf.V[i] for i in active_idx]
+    s_coeff = sum(coeff)
+    s_vol = sum(vols)
+
+    @test isapprox(s_coeff, 1.0; atol=1e-12, rtol=0.0)
+    @test isfinite(s_vol) && s_vol > 0.0
+
+    coeffn = coeff ./ s_coeff
+    voln = vols ./ s_vol
+    @test maximum(abs.(coeffn .- voln)) < 1e-10
+end
+
 @testset "MMS box convergence + pressure/divergence diagnostics (2D)" begin
     bcx, bcy = mms_box_bcs()
     ns = (17, 33, 65)
@@ -791,6 +984,125 @@ end
         ord_v = log(ev[k] / ev[k + 1]) / log(hs[k] / hs[k + 1])
         @test ord_u > 0.5
         @test ord_v > 0.5
+    end
+end
+
+@testset "MMS convergence with matched right PressureOutlet (2D)" begin
+    pout = 0.7
+    ns = (17, 33, 65)
+    hs = Float64[]
+    eu = Float64[]
+    ev = Float64[]
+    ep = Float64[]
+
+    bcx = BorderConditions(
+        ; left=Dirichlet((x, y) -> po_u(x, y)),
+        right=PressureOutlet(pout),
+        bottom=Dirichlet((x, y) -> po_u(x, y)),
+        top=Dirichlet((x, y) -> po_u(x, y)),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet((x, y) -> po_v(x, y)),
+        right=PressureOutlet(pout),
+        bottom=Dirichlet((x, y) -> po_v(x, y)),
+        top=Dirichlet((x, y) -> po_v(x, y)),
+    )
+
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        model = StokesModelMono(
+            grid,
+            full_body,
+            MMS_MU,
+            1.0;
+            bc_u=(bcx, bcy),
+            bc_p=nothing,
+            bc_cut=Dirichlet(0.0),
+            force=(po_fx, po_fy),
+            gauge=MeanPressureGauge(),
+        )
+        sys = solve_steady!(model)
+        m = velocity_pressure_metrics(model, sys, po_u, po_v, (x, y) -> po_p(x, y; pout=pout))
+        @test norm(sys.A * sys.x - sys.b) < 1e-8
+        push!(hs, 1.0 / (n - 1))
+        push!(eu, m.uL2)
+        push!(ev, m.vL2)
+        push!(ep, m.pL2)
+    end
+
+    @test eu[2] < eu[1]
+    @test eu[3] < eu[2]
+    @test ev[2] < ev[1]
+    @test ev[3] < ev[2]
+    @test ep[2] < ep[1]
+    @test ep[3] < ep[2]
+
+    for k in 1:2
+        ord_u = log(eu[k] / eu[k + 1]) / log(hs[k] / hs[k + 1])
+        ord_v = log(ev[k] / ev[k + 1]) / log(hs[k] / hs[k + 1])
+        ord_p = log(ep[k] / ep[k + 1]) / log(hs[k] / hs[k + 1])
+        @test ord_u > 1.7
+        @test ord_v > 1.7
+        @test ord_p > 0.45
+    end
+end
+
+@testset "MMS convergence with matched right DoNothing (2D)" begin
+    ns = (17, 33, 65)
+    hs = Float64[]
+    eu = Float64[]
+    ev = Float64[]
+    ep = Float64[]
+
+    bcx = BorderConditions(
+        ; left=Dirichlet((x, y) -> po_u(x, y)),
+        right=DoNothing(),
+        bottom=Dirichlet((x, y) -> po_u(x, y)),
+        top=Dirichlet((x, y) -> po_u(x, y)),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet((x, y) -> po_v(x, y)),
+        right=DoNothing(),
+        bottom=Dirichlet((x, y) -> po_v(x, y)),
+        top=Dirichlet((x, y) -> po_v(x, y)),
+    )
+
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        model = StokesModelMono(
+            grid,
+            full_body,
+            MMS_MU,
+            1.0;
+            bc_u=(bcx, bcy),
+            bc_p=nothing,
+            bc_cut=Dirichlet(0.0),
+            force=(po_fx, po_fy),
+            gauge=MeanPressureGauge(),
+        )
+        sys = solve_steady!(model)
+        m = velocity_pressure_metrics(model, sys, po_u, po_v, (x, y) -> po_p(x, y; pout=0.0))
+        @test norm(sys.A * sys.x - sys.b) < 1e-8
+        push!(hs, 1.0 / (n - 1))
+        push!(eu, m.uL2)
+        push!(ev, m.vL2)
+        push!(ep, m.pL2)
+    end
+
+    @test eu[2] < eu[1]
+    @test eu[3] < eu[2]
+    @test ev[2] < ev[1]
+    @test ev[3] < ev[2]
+    @test ep[2] < ep[1]
+    @test ep[3] < ep[2]
+
+    for k in 1:2
+        ord_u = log(eu[k] / eu[k + 1]) / log(hs[k] / hs[k + 1])
+        ord_v = log(ev[k] / ev[k + 1]) / log(hs[k] / hs[k + 1])
+        ord_p = log(ep[k] / ep[k + 1]) / log(hs[k] / hs[k + 1])
+        @test ord_u > 1.7
+        @test ord_v > 1.7
+        @test ord_p > 0.45
     end
 end
 
@@ -1346,4 +1658,5 @@ end
 end
 
 include("moving_boundary_stokes_tests.jl")
+include("test_outlet_row_equivalence.jl")
 include("test_traction_box_debug.jl")

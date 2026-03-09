@@ -496,6 +496,35 @@ function _pressure_activity(cap::AssembledCapacity{N,T}) where {N,T}
     return active
 end
 
+function _pressure_interior_activity(cap::AssembledCapacity{N,T}) where {N,T}
+    active = BitVector(undef, cap.ntotal)
+    li = LinearIndices(cap.nnodes)
+    @inbounds for I in CartesianIndices(cap.nnodes)
+        i = li[I]
+        physical = true
+        interior = true
+        for d in 1:N
+            # Node-padded layout: only the last layer is a halo.
+            if I[d] == cap.nnodes[d]
+                physical = false
+                break
+            end
+            # Prefer not to pin/replace pressure equations on the outermost
+            # physical ring when an interior coupled row exists.
+            if !(1 < I[d] < (cap.nnodes[d] - 1))
+                interior = false
+            end
+        end
+        if !physical
+            active[i] = false
+            continue
+        end
+        v = cap.buf.V[i]
+        active[i] = interior && isfinite(v) && v > zero(T)
+    end
+    return active
+end
+
 function _prune_uncoupled_active!(active::BitVector, A::SparseMatrixCSC{T,Int}) where {T}
     n = size(A, 2)
     length(active) == n || throw(DimensionMismatch("active-mask length must match matrix size"))
@@ -1012,6 +1041,17 @@ function _traction_component(
     throw(ArgumentError("unsupported traction boundary type $(typeof(side_bc)) on side `$side`"))
 end
 
+function _resolve_side_traction(
+    side_bcs::NTuple{N,AbstractBoundary},
+    side::Symbol,
+    xb::SVector{N,T},
+    t::T,
+    ::Val{N},
+    ::Type{T},
+) where {N,T}
+    return SVector{N,T}(ntuple(comp -> _traction_component(side_bcs[comp], comp, side, xb, t, Val(N), T), N))
+end
+
 function _apply_traction_box_bc_block!(
     A::SparseMatrixCSC{T,Int},
     b::Vector{T},
@@ -1037,8 +1077,7 @@ function _apply_traction_box_bc_block!(
             x_d = is_high ? gridp.hc[d] : gridp.lc[d]
 
             @inbounds for comp in 1:N
-                side_bc = side_bcs[comp]
-                _is_stokes_traction_bc(side_bc) || continue
+                _is_stokes_traction_bc(side_bcs[comp]) || continue
 
                 cap_comp = cap_u[comp]
                 cap_d = cap_u[d]
@@ -1058,7 +1097,8 @@ function _apply_traction_box_bc_block!(
 
                     x = cap_comp.C_ω[i]
                     xb = SVector{N,T}(ntuple(k -> (k == d ? x_d : x[k]), N))
-                    rhs = _traction_component(side_bc, comp, side, xb, t, Val(N), T)
+                    traction_vec = _resolve_side_traction(side_bcs, side, xb, t, Val(N), T)
+                    rhs = traction_vec[comp]
 
                     cols = Int[]
                     vals = T[]
@@ -1532,39 +1572,94 @@ function _first_coupled_pressure_index(
     return nothing
 end
 
-function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelMono{N,T}) where {N,T}
-    layout = model.layout
-    nt = model.cap_p.ntotal
-    row = first(layout.pomega)
+function _default_pressure_gauge_index(
+    cap::AssembledCapacity{N,T},
+    A::SparseMatrixCSC{T,Int},
+    pomega::UnitRange{Int},
+) where {N,T}
+    pactive = _pressure_activity(cap)
+    pinterior = _pressure_interior_activity(cap)
+    pcand = pactive .& pinterior
 
-    if model.gauge isa PinPressureGauge
-        idx = if !isnothing(model.gauge.index)
-            model.gauge.index
-        else
-            pactive = _pressure_activity(model.cap_p)
-            coupled = _first_coupled_pressure_index(A, layout.pomega, pactive)
-            isnothing(coupled) ? _first_active_pressure_index(model) : coupled
-        end
-        1 <= idx <= nt || throw(ArgumentError("pressure pin index must be in 1:$nt"))
-        col = layout.pomega[idx]
-        _enforce_dirichlet!(A, b, row, col, zero(T))
-        return A, b
-    elseif model.gauge isa MeanPressureGauge
-        @inbounds for j in 1:size(A, 2)
-            A[row, j] = zero(T)
-        end
-        pactive = _pressure_activity(model.cap_p)
-        active_idx = findall(pactive)
-        if isempty(active_idx)
-            A[row, layout.pomega[1]] = one(T)
-        else
-            w = inv(convert(T, length(active_idx)))
-            @inbounds for i in active_idx
-                A[row, layout.pomega[i]] = w
-            end
-        end
+    coupled = _first_coupled_pressure_index(A, pomega, pcand)
+    !isnothing(coupled) && return coupled
+
+    coupled = _first_coupled_pressure_index(A, pomega, pactive)
+    !isnothing(coupled) && return coupled
+
+    idx = findfirst(pcand)
+    !isnothing(idx) && return idx
+    return _first_active_pressure_index(cap)
+end
+
+function _apply_pin_pressure_gauge!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    pomega::UnitRange{Int},
+    cap::AssembledCapacity{N,T},
+    gauge::PinPressureGauge,
+) where {N,T}
+    nt = cap.ntotal
+    idx = isnothing(gauge.index) ? _default_pressure_gauge_index(cap, A, pomega) : gauge.index
+    1 <= idx <= nt || throw(ArgumentError("pressure pin index must be in 1:$nt"))
+    row = pomega[idx]
+    col = pomega[idx]
+    _enforce_dirichlet!(A, b, row, col, zero(T))
+    return A, b
+end
+
+function _apply_mean_pressure_gauge!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    pomega::UnitRange{Int},
+    cap::AssembledCapacity{N,T},
+) where {N,T}
+    idx0 = _default_pressure_gauge_index(cap, A, pomega)
+    row = pomega[idx0]
+
+    @inbounds for j in 1:size(A, 2)
+        A[row, j] = zero(T)
+    end
+
+    pactive = _pressure_activity(cap)
+    active_idx = findall(pactive)
+    if isempty(active_idx)
+        A[row, pomega[idx0]] = one(T)
         b[row] = zero(T)
         return A, b
+    end
+
+    vols = Vector{T}(undef, length(active_idx))
+    s = zero(T)
+    @inbounds for k in eachindex(active_idx)
+        v = cap.buf.V[active_idx[k]]
+        vk = (isfinite(v) && v > zero(T)) ? v : zero(T)
+        vols[k] = vk
+        s += vk
+    end
+
+    if !(isfinite(s) && s > zero(T))
+        w = inv(convert(T, length(active_idx)))
+        @inbounds for i in active_idx
+            A[row, pomega[i]] = w
+        end
+    else
+        @inbounds for (k, i) in enumerate(active_idx)
+            A[row, pomega[i]] = vols[k] / s
+        end
+    end
+
+    b[row] = zero(T)
+    return A, b
+end
+
+function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelMono{N,T}) where {N,T}
+    layout = model.layout
+
+    if model.gauge isa PinPressureGauge
+        return _apply_pin_pressure_gauge!(A, b, layout.pomega, model.cap_p, model.gauge)
+    elseif model.gauge isa MeanPressureGauge
+        return _apply_mean_pressure_gauge!(A, b, layout.pomega, model.cap_p)
     end
 
     throw(ArgumentError("unsupported pressure gauge type $(typeof(model.gauge))"))
@@ -1572,37 +1667,11 @@ end
 
 function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelTwoPhase{N,T}) where {N,T}
     layout = model.layout
-    nt = model.cap_p1.ntotal
-    row = first(layout.pomega1)
 
     if model.gauge isa PinPressureGauge
-        idx = if !isnothing(model.gauge.index)
-            model.gauge.index
-        else
-            pactive = _pressure_activity(model.cap_p1)
-            coupled = _first_coupled_pressure_index(A, layout.pomega1, pactive)
-            isnothing(coupled) ? _first_active_pressure_index(model.cap_p1) : coupled
-        end
-        1 <= idx <= nt || throw(ArgumentError("pressure pin index must be in 1:$nt"))
-        col = layout.pomega1[idx]
-        _enforce_dirichlet!(A, b, row, col, zero(T))
-        return A, b
+        return _apply_pin_pressure_gauge!(A, b, layout.pomega1, model.cap_p1, model.gauge)
     elseif model.gauge isa MeanPressureGauge
-        @inbounds for j in 1:size(A, 2)
-            A[row, j] = zero(T)
-        end
-        pactive = _pressure_activity(model.cap_p1)
-        active_idx = findall(pactive)
-        if isempty(active_idx)
-            A[row, layout.pomega1[1]] = one(T)
-        else
-            w = inv(convert(T, length(active_idx)))
-            @inbounds for i in active_idx
-                A[row, layout.pomega1[i]] = w
-            end
-        end
-        b[row] = zero(T)
-        return A, b
+        return _apply_mean_pressure_gauge!(A, b, layout.pomega1, model.cap_p1)
     end
 
     throw(ArgumentError("unsupported pressure gauge type $(typeof(model.gauge))"))
@@ -1613,37 +1682,11 @@ function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::
     cap_p_end = something(model.cap_p_end)
 
     layout = model.layout
-    nt = cap_p_end.ntotal
-    row = first(layout.pomega)
 
     if model.gauge isa PinPressureGauge
-        idx = if !isnothing(model.gauge.index)
-            model.gauge.index
-        else
-            pactive = _pressure_activity(cap_p_end)
-            coupled = _first_coupled_pressure_index(A, layout.pomega, pactive)
-            isnothing(coupled) ? _first_active_pressure_index(cap_p_end) : coupled
-        end
-        1 <= idx <= nt || throw(ArgumentError("pressure pin index must be in 1:$nt"))
-        col = layout.pomega[idx]
-        _enforce_dirichlet!(A, b, row, col, zero(T))
-        return A, b
+        return _apply_pin_pressure_gauge!(A, b, layout.pomega, cap_p_end, model.gauge)
     elseif model.gauge isa MeanPressureGauge
-        @inbounds for j in 1:size(A, 2)
-            A[row, j] = zero(T)
-        end
-        pactive = _pressure_activity(cap_p_end)
-        active_idx = findall(pactive)
-        if isempty(active_idx)
-            A[row, layout.pomega[1]] = one(T)
-        else
-            w = inv(convert(T, length(active_idx)))
-            @inbounds for i in active_idx
-                A[row, layout.pomega[i]] = w
-            end
-        end
-        b[row] = zero(T)
-        return A, b
+        return _apply_mean_pressure_gauge!(A, b, layout.pomega, cap_p_end)
     end
 
     throw(ArgumentError("unsupported pressure gauge type $(typeof(model.gauge))"))

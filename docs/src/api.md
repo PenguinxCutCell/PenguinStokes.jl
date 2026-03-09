@@ -23,6 +23,8 @@ Notes
 - `PressureOutlet(pout)`, `DoNothing()`, and `Traction(t)`.
 - Traction-type BCs must be set on all velocity components for a given side.
 - Pressure gauge remains required; optional wall constraints can be passed through `bc_p`.
+- `PinPressureGauge(index=...)` pins that same pressure DOF row/column.
+- `MeanPressureGauge()` uses active-cell-volume weights for the zero-mean constraint.
 - Cut/interface BC currently supports Dirichlet values for `ugamma`.
 - `MovingStokesModelMono` uses per-component cut Dirichlet data through `bc_cut_u`.
 - `StokesModelTwoPhase` reuses `ugamma` rows as traction-balance equations (no separate `bc_cut`).

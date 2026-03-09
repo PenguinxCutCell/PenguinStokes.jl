@@ -18,6 +18,8 @@ Discrete structure
 - Pressure coupling is assembled via split gradient/divergence blocks built from pressure operators.
 - Interface/cut rows enforce `ugamma = g_cut` (Dirichlet currently).
 - Continuity rows enforce incompressibility with pressure gauge replacement for nullspace control.
+- `PinPressureGauge(index=...)` now replaces the pressure equation at that same DOF (`pomega[index]`), rather than always overwriting the first pressure row.
+- `MeanPressureGauge()` now enforces a volume-weighted zero-mean pressure on active pressure cells.
 
 Two-phase interface rows
 
@@ -42,6 +44,7 @@ Pressure wall handling (`bc_p`)
 - When `bc_p === nothing`, pressure wall rows are not modified; the usual continuity + gauge system is assembled.
 - When `bc_p` is provided, box pressure wall constraints (Dirichlet/Neumann) can be imposed explicitly.
 - This is intended for cases where pressure-wall data is known/desired (for example MMS studies with prescribed normal pressure derivative).
+- Pressure errors should generally be evaluated with a shift-invariant metric (`p - mean(p)` or equivalent), since raw pressure levels remain gauge-dependent.
 
 Outer-box Stokes traction BCs (`bc_u`)
 
