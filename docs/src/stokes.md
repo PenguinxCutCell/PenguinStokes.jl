@@ -43,6 +43,18 @@ Pressure wall handling (`bc_p`)
 - When `bc_p` is provided, box pressure wall constraints (Dirichlet/Neumann) can be imposed explicitly.
 - This is intended for cases where pressure-wall data is known/desired (for example MMS studies with prescribed normal pressure derivative).
 
+Outer-box Stokes traction BCs (`bc_u`)
+
+- In addition to scalar velocity BCs (`Dirichlet`, `Neumann`, `Periodic`), outer-box sides now support:
+- `PressureOutlet(pout)` for `σn = -pout*n`,
+- `DoNothing()` for homogeneous traction `σn = 0`,
+- `Traction(t)` for prescribed full traction vector `σn = t`.
+- Traction BCs are enforced with side-based row overwrite of boundary-adjacent momentum rows, including:
+- pressure coupling in normal traction rows,
+- symmetric-gradient cross coupling in tangential traction rows (`∂ₙu_t + ∂_t u_n`).
+- A traction side must be declared on all velocity components for that side.
+- `bc_p` is not allowed on traction sides (pressure is already part of the traction law there).
+
 Embedded-boundary force and stress post-processing
 
 - `embedded_boundary_quantities(model, x; ...)` computes stress tensors, traction vectors, and integrated force density on pressure-grid cut cells.

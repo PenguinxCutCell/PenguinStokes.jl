@@ -19,6 +19,9 @@ Typical construction
 Notes
 
 - Velocity boundary conditions are passed component-wise through `bc_u`.
+- Outer-box Stokes traction laws are available through `PenguinBCs` side entries in `bc_u`:
+- `PressureOutlet(pout)`, `DoNothing()`, and `Traction(t)`.
+- Traction-type BCs must be set on all velocity components for a given side.
 - Pressure gauge remains required; optional wall constraints can be passed through `bc_p`.
 - Cut/interface BC currently supports Dirichlet values for `ugamma`.
 - `MovingStokesModelMono` uses per-component cut Dirichlet data through `bc_cut_u`.

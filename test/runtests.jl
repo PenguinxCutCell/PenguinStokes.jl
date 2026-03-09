@@ -4,7 +4,7 @@ using SparseArrays
 using StaticArrays: SMatrix, SVector
 
 using CartesianGrids: CartesianGrid
-using PenguinBCs: BorderConditions, Dirichlet, Periodic
+using PenguinBCs: BorderConditions, Dirichlet, DoNothing, Neumann, Periodic, PressureOutlet, Traction
 using PenguinSolverCore: LinearSystem
 using PenguinStokes
 
@@ -20,6 +20,10 @@ mms_lap_u(x, y) = -2 * pi^3 * cos(pi * y) * sin(pi * x)
 mms_lap_v(x, y) = 2 * pi^3 * cos(pi * x) * sin(pi * y)
 mms_dpx(x, y) = -pi * sin(pi * x) * sin(pi * y)
 mms_dpy(x, y) = pi * cos(pi * x) * cos(pi * y)
+mms_dux(x, y) = pi^2 * cos(pi * y) * cos(pi * x)
+mms_duy(x, y) = -pi^2 * sin(pi * y) * sin(pi * x)
+mms_dvx(x, y) = pi^2 * sin(pi * x) * sin(pi * y)
+mms_dvy(x, y) = -pi^2 * cos(pi * x) * cos(pi * y)
 
 # Sign follows current operator convention in PenguinStokes assembly.
 mms_fx(x, y) = -MMS_MU * mms_lap_u(x, y) - mms_dpx(x, y)
@@ -41,6 +45,19 @@ poly_lap_u(x, y) = poly_hpp(x) * poly_gp(y) + poly_h(x) * poly_g3(y)
 poly_lap_v(x, y) = -(poly_h3(x) * poly_g(y) + poly_hp(x) * poly_gpp(y))
 poly_fx(x, y) = -MMS_MU * poly_lap_u(x, y)
 poly_fy(x, y) = -MMS_MU * poly_lap_v(x, y)
+
+# Tangential-traction MMS (polynomial streamfunction, p=0):
+# ψ = x^2 * y * (1-y), u = ∂y ψ, v = -∂x ψ.
+tan_u(x, y) = x^2 * (1 - 2y)
+tan_v(x, y) = -2x * y * (1 - y)
+tan_ux(x, y) = 2x * (1 - 2y)
+tan_uy(x, y) = -2x^2
+tan_vx(x, y) = -2y * (1 - y)
+tan_vy(x, y) = -2x * (1 - 2y)
+tan_lap_u(x, y) = 2 * (1 - 2y)
+tan_lap_v(x, y) = 4x
+tan_fx(x, y) = -MMS_MU * tan_lap_u(x, y)
+tan_fy(x, y) = -MMS_MU * tan_lap_v(x, y)
 
 function all_dirichlet_bc(::Val{1})
     return BorderConditions(; left=Dirichlet(0.0), right=Dirichlet(0.0))
@@ -490,6 +507,173 @@ end
     end
 end
 
+@testset "Outer-box traction BC validation rules (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+
+    bcx_mix = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_mix = BorderConditions(
+        ; left=Dirichlet(0.0), right=Neumann(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    @test_throws ArgumentError StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx_mix, bcy_mix),
+    )
+
+    bcx = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcp_conflict = BorderConditions(; right=Neumann(0.0))
+    @test_throws ArgumentError StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx, bcy),
+        bc_p=bcp_conflict,
+    )
+
+    # Pure traction-side setup should be accepted.
+    bcx_ok = BorderConditions(
+        ; left=Dirichlet(0.0), right=DoNothing(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_ok = BorderConditions(
+        ; left=Dirichlet(0.0), right=Traction(SVector(0.0, 0.0)),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    model_ok = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx_ok, bcy_ok),
+    )
+    @test model_ok isa StokesModelMono
+end
+
+@testset "Outer-box pressure-outlet traction rows couple p and cross-shear (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bcx = BorderConditions(
+        ; left=Dirichlet(1.0), right=PressureOutlet(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(0.0),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+
+    model = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx, bcy),
+        bc_p=nothing,
+        force=(0.0, 0.0),
+    )
+
+    nsys = last(model.layout.pomega)
+    sys = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(sys, model, 0.0)
+
+    liux = LinearIndices(model.cap_u[1].nnodes)
+    liuy = LinearIndices(model.cap_u[2].nnodes)
+    lip = LinearIndices(model.cap_p.nnodes)
+    I = CartesianIndex(model.cap_u[1].nnodes[1] - 1, 4)
+    iux = liux[I]
+    iuy = liuy[I]
+    ip = lip[I]
+
+    row_ux = model.layout.uomega[1][iux]
+    row_uy = model.layout.uomega[2][iuy]
+    row_p = model.layout.pomega[ip]
+
+    # Normal traction equation includes pressure on outlet rows.
+    @test any(abs.(Array(sys.A[row_ux, model.layout.pomega])) .> 0.0)
+    # Tangential traction equation includes ∂_t u_n cross-component coupling.
+    @test any(abs.(Array(sys.A[row_uy, model.layout.uomega[1]])) .> 0.0)
+    # Pressure rows on traction sides are not overwritten as scalar pressure BC rows.
+    @test nnz(sys.A[row_p, :]) > 1
+end
+
+@testset "Outer-box do-nothing equals zero-traction rows (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (15, 15))
+    bcx_dn = BorderConditions(
+        ; left=Dirichlet(0.0), right=DoNothing(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_dn = BorderConditions(
+        ; left=Dirichlet(0.0), right=DoNothing(),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcx_t0 = BorderConditions(
+        ; left=Dirichlet(0.0), right=Traction(SVector(0.0, 0.0)),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy_t0 = BorderConditions(
+        ; left=Dirichlet(0.0), right=Traction(SVector(0.0, 0.0)),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+
+    m_dn = StokesModelMono(grid, full_body, 1.0, 1.0; bc_u=(bcx_dn, bcy_dn), force=(0.0, 0.0))
+    m_t0 = StokesModelMono(grid, full_body, 1.0, 1.0; bc_u=(bcx_t0, bcy_t0), force=(0.0, 0.0))
+    nsys = last(m_dn.layout.pomega)
+    s_dn = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    s_t0 = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(s_dn, m_dn, 0.0)
+    assemble_steady!(s_t0, m_t0, 0.0)
+
+    li = LinearIndices(m_dn.cap_u[1].nnodes)
+    I = CartesianIndex(m_dn.cap_u[1].nnodes[1] - 1, 5)
+    i = li[I]
+    rux_dn = m_dn.layout.uomega[1][i]
+    ruy_dn = m_dn.layout.uomega[2][i]
+    rux_t0 = m_t0.layout.uomega[1][i]
+    ruy_t0 = m_t0.layout.uomega[2][i]
+
+    @test Array(s_dn.A[rux_dn, :]) ≈ Array(s_t0.A[rux_t0, :]) atol=1e-14 rtol=0.0
+    @test Array(s_dn.A[ruy_dn, :]) ≈ Array(s_t0.A[ruy_t0, :]) atol=1e-14 rtol=0.0
+    @test s_dn.b[rux_dn] == s_t0.b[rux_t0] == 0.0
+    @test s_dn.b[ruy_dn] == s_t0.b[ruy_t0] == 0.0
+end
+
+@testset "Outer-box pressure-outlet row RHS/sign (2D)" begin
+    pout = 2.3
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bcx = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(pout),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(pout),
+        bottom=Dirichlet(0.0), top=Dirichlet(0.0),
+    )
+    model = StokesModelMono(grid, full_body, 1.0, 1.0; bc_u=(bcx, bcy), force=(0.0, 0.0))
+    nsys = last(model.layout.pomega)
+    sys = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(sys, model, 0.0)
+
+    li = LinearIndices(model.cap_u[1].nnodes)
+    I = CartesianIndex(model.cap_u[1].nnodes[1] - 1, 4)
+    i = li[I]
+    rux = model.layout.uomega[1][i]
+    ruy = model.layout.uomega[2][i]
+    @test isapprox(sys.b[rux], -pout; atol=1e-12, rtol=0.0)
+    @test isapprox(sys.b[ruy], 0.0; atol=1e-12, rtol=0.0)
+end
+
 @testset "MMS box convergence + pressure/divergence diagnostics (2D)" begin
     bcx, bcy = mms_box_bcs()
     ns = (17, 33, 65)
@@ -547,6 +731,165 @@ end
     @test isfinite(pAbs[1])
     @test isfinite(pAbs[2])
     @test isfinite(pAbs[3])
+end
+
+@testset "MMS convergence with exact right traction (2D)" begin
+    ns = (17, 33, 65)
+    hs = Float64[]
+    eu = Float64[]
+    ev = Float64[]
+    ep = Float64[]
+
+    tx(x, y) = -mms_p(x, y) + 2 * MMS_MU * mms_dux(x, y)
+    ty(x, y) = MMS_MU * (mms_dvx(x, y) + mms_duy(x, y))
+    tvec(x, y) = SVector(tx(x, y), ty(x, y))
+
+    bcx = BorderConditions(
+        ; left=Dirichlet((x, y) -> mms_u(x, y)),
+        right=Traction((x, y) -> tvec(x, y)),
+        bottom=Dirichlet((x, y) -> mms_u(x, y)),
+        top=Dirichlet((x, y) -> mms_u(x, y)),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet((x, y) -> mms_v(x, y)),
+        right=Traction((x, y) -> tvec(x, y)),
+        bottom=Dirichlet((x, y) -> mms_v(x, y)),
+        top=Dirichlet((x, y) -> mms_v(x, y)),
+    )
+
+    for n in ns
+        grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+        model = StokesModelMono(
+            grid,
+            full_body,
+            MMS_MU,
+            1.0;
+            bc_u=(bcx, bcy),
+            bc_p=nothing,
+            bc_cut=Dirichlet(0.0),
+            force=(mms_fx, mms_fy),
+            gauge=MeanPressureGauge(),
+        )
+        sys = solve_steady!(model)
+        m = mms_box_metrics(model, sys)
+        @test norm(sys.A * sys.x - sys.b) < 1e-8
+        push!(hs, 1.0 / (n - 1))
+        push!(eu, m.uL2)
+        push!(ev, m.vL2)
+        push!(ep, m.pL2)
+    end
+
+    @test eu[2] < eu[1]
+    @test eu[3] < eu[2]
+    @test ev[2] < ev[1]
+    @test ev[3] < ev[2]
+    @test ep[2] < ep[1]
+    @test ep[3] < ep[2]
+
+    for k in 1:2
+        ord_u = log(eu[k] / eu[k + 1]) / log(hs[k] / hs[k + 1])
+        ord_v = log(ev[k] / ev[k + 1]) / log(hs[k] / hs[k + 1])
+        @test ord_u > 0.5
+        @test ord_v > 0.5
+    end
+end
+
+@testset "MMS tangential traction rows and DoNothing contrast (2D)" begin
+    tx(x, y) = 2 * MMS_MU * tan_ux(x, y)
+    ty(x, y) = MMS_MU * (tan_vx(x, y) + tan_uy(x, y))
+    tvec(x, y) = SVector(tx(x, y), ty(x, y))
+
+    bcx_t = BorderConditions(
+        ; left=Dirichlet((x, y) -> tan_u(x, y)),
+        right=Traction((x, y) -> tvec(x, y)),
+        bottom=Dirichlet((x, y) -> tan_u(x, y)),
+        top=Dirichlet((x, y) -> tan_u(x, y)),
+    )
+    bcy_t = BorderConditions(
+        ; left=Dirichlet((x, y) -> tan_v(x, y)),
+        right=Traction((x, y) -> tvec(x, y)),
+        bottom=Dirichlet((x, y) -> tan_v(x, y)),
+        top=Dirichlet((x, y) -> tan_v(x, y)),
+    )
+    n = 33
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
+    bcx_dn = BorderConditions(
+        ; left=Dirichlet((x, y) -> tan_u(x, y)),
+        right=DoNothing(),
+        bottom=Dirichlet((x, y) -> tan_u(x, y)),
+        top=Dirichlet((x, y) -> tan_u(x, y)),
+    )
+    bcy_dn = BorderConditions(
+        ; left=Dirichlet((x, y) -> tan_v(x, y)),
+        right=DoNothing(),
+        bottom=Dirichlet((x, y) -> tan_v(x, y)),
+        top=Dirichlet((x, y) -> tan_v(x, y)),
+    )
+    model_t = StokesModelMono(
+        grid,
+        full_body,
+        MMS_MU,
+        1.0;
+        bc_u=(bcx_t, bcy_t),
+        bc_p=nothing,
+        bc_cut=Dirichlet(0.0),
+        force=(tan_fx, tan_fy),
+        gauge=MeanPressureGauge(),
+    )
+    model_dn = StokesModelMono(
+        grid,
+        full_body,
+        MMS_MU,
+        1.0;
+        bc_u=(bcx_dn, bcy_dn),
+        bc_p=nothing,
+        bc_cut=Dirichlet(0.0),
+        force=(tan_fx, tan_fy),
+        gauge=MeanPressureGauge(),
+    )
+    nsys = last(model_t.layout.pomega)
+    asm_t = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    asm_dn = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(asm_t, model_t, 0.0)
+    assemble_steady!(asm_dn, model_dn, 0.0)
+
+    li = LinearIndices(model_t.cap_u[2].nnodes)
+    I = CartesianIndex(model_t.cap_u[2].nnodes[1] - 1, 4)
+    i = li[I]
+    row_t = model_t.layout.uomega[2][i]
+    row_dn = model_dn.layout.uomega[2][i]
+
+    # Tangential traction RHS is nonzero, while DoNothing is homogeneous.
+    @test abs(asm_t.b[row_t]) > 1e-6
+    @test isapprox(asm_dn.b[row_dn], 0.0; atol=1e-12, rtol=0.0)
+    # Cross-component coupling (∂_t u_n term) must appear.
+    @test any(abs.(Array(asm_t.A[row_t, model_t.layout.uomega[1]])) .> 0.0)
+
+    sys_t = solve_steady!(model_t)
+    sys_dn = solve_steady!(model_dn)
+    @test norm(sys_t.A * sys_t.x - sys_t.b) < 1e-8
+    @test norm(sys_dn.A * sys_dn.x - sys_dn.b) < 1e-8
+
+    function _uv_l2(model, x)
+        u = x[model.layout.uomega[1]]
+        v = x[model.layout.uomega[2]]
+        e2 = 0.0
+        w = 0.0
+        for i in 1:model.cap_u[1].ntotal
+            V = model.cap_u[1].buf.V[i]
+            if isfinite(V) && V > 0.0
+                xw = model.cap_u[1].C_ω[i]
+                e2 += V * (u[i] - tan_u(xw[1], xw[2]))^2
+                e2 += V * (v[i] - tan_v(xw[1], xw[2]))^2
+                w += 2V
+            end
+        end
+        return sqrt(e2 / w)
+    end
+
+    err_t = _uv_l2(model_t, sys_t.x)
+    err_dn = _uv_l2(model_dn, sys_dn.x)
+    @test abs(err_t - err_dn) > 1e-4
 end
 
 @testset "MMS box convergence (zero-pressure, no body) near second order (2D)" begin
@@ -946,8 +1289,11 @@ end
         push!(e2, m.u2L2)
     end
 
-    @test e1[2] < e1[1]
-    @test e2[2] < e2[1]
+    # On this benchmark the error can be close to machine precision already on the coarser grid.
+    # In that regime strict monotonicity is not robust, so use a floating floor.
+    floor_tol = 1e-10
+    @test e1[2] < max(e1[1], floor_tol)
+    @test e2[2] < max(e2[1], floor_tol)
     @test e1[2] < 5e-5
     @test e2[2] < 5e-5
 end
@@ -1000,3 +1346,4 @@ end
 end
 
 include("moving_boundary_stokes_tests.jl")
+include("test_traction_box_debug.jl")

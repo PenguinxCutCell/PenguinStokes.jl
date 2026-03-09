@@ -7,7 +7,7 @@ using StaticArrays
 using CartesianGeometry: GeometricMoments, geometric_moments, nan
 using CartesianGrids: CartesianGrid, SpaceTimeCartesianGrid, grid1d, meshsize
 using CartesianOperators: AssembledCapacity, DiffusionOps, assembled_capacity, each_boundary_cell, periodic_flags, side_info
-using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, eval_bc, validate_borderconditions!
+using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, eval_bc, validate_borderconditions!
 using PenguinSolverCore: LinearSystem, solve!
 
 export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge
@@ -202,6 +202,69 @@ function _validate_pressure_bc(
     periodic_flags(bc_p, N) == periodic ||
         throw(ArgumentError("pressure border condition periodic flags must match velocity periodic flags"))
     return bc_p
+end
+
+@inline _is_stokes_traction_bc(bc::AbstractBoundary) =
+    bc isa Traction || bc isa PressureOutlet || bc isa DoNothing
+
+@inline _is_scalar_velocity_bc(bc::AbstractBoundary) =
+    bc isa Dirichlet || bc isa Neumann || bc isa Periodic
+
+function _side_velocity_bcs(
+    bc_u::NTuple{N,BorderConditions},
+    side::Symbol,
+    ::Type{T},
+) where {N,T}
+    return ntuple(comp -> get(bc_u[comp].borders, side, Neumann(zero(T))), N)
+end
+
+function _side_uses_traction_bc(
+    bc_u::NTuple{N,BorderConditions},
+    side::Symbol,
+    ::Type{T},
+) where {N,T}
+    side_bcs = _side_velocity_bcs(bc_u, side, T)
+    return any(_is_stokes_traction_bc, side_bcs)
+end
+
+function _pressure_side_conflicts_with_traction(
+    bc_p::Union{Nothing,BorderConditions},
+    side::Symbol,
+)
+    isnothing(bc_p) && return false
+    return haskey(bc_p.borders, side)
+end
+
+function _validate_stokes_box_bcs!(
+    bc_u::NTuple{N,BorderConditions},
+    bc_p::Union{Nothing,BorderConditions},
+    periodic::NTuple{N,Bool},
+    ::Type{T},
+) where {N,T}
+    pairs = _side_pairs(N)
+    for d in 1:N
+        side_lo, side_hi = pairs[d]
+        for side in (side_lo, side_hi)
+            side_bcs = _side_velocity_bcs(bc_u, side, T)
+            traction_mask = ntuple(comp -> _is_stokes_traction_bc(side_bcs[comp]), N)
+            any_traction = any(traction_mask)
+
+            for comp in 1:N
+                bc = side_bcs[comp]
+                (_is_scalar_velocity_bc(bc) || _is_stokes_traction_bc(bc)) ||
+                    throw(ArgumentError("unsupported velocity boundary type $(typeof(bc)) on side `$side`"))
+            end
+
+            any_traction || continue
+            all(traction_mask) ||
+                throw(ArgumentError("traction-type Stokes BC on side `$side` must be set on all velocity components"))
+            periodic[d] &&
+                throw(ArgumentError("traction-type Stokes BC on side `$side` is incompatible with periodic boundaries"))
+            _pressure_side_conflicts_with_traction(bc_p, side) &&
+                throw(ArgumentError("pressure BC on side `$side` conflicts with traction-type velocity BC"))
+        end
+    end
+    return nothing
 end
 
 function _side_pairs(N::Int)
@@ -678,6 +741,456 @@ function _set_sparse_row!(
     return A, b
 end
 
+@inline function _iadd_term!(cols::Vector{Int}, vals::Vector{T}, col::Int, val::T) where {T}
+    iszero(val) && return nothing
+    @inbounds for k in eachindex(cols)
+        if cols[k] == col
+            vals[k] += val
+            return nothing
+        end
+    end
+    push!(cols, col)
+    push!(vals, val)
+    return nothing
+end
+
+function _append_scaled_terms!(
+    cols::Vector{Int},
+    vals::Vector{T},
+    tcols::Vector{Int},
+    tvals::Vector{T},
+    scale::T,
+) where {T}
+    @inbounds for k in eachindex(tcols)
+        _iadd_term!(cols, vals, tcols[k], scale * tvals[k])
+    end
+    return nothing
+end
+
+@inline function _is_physical_cart_index(I::CartesianIndex{N}, nnodes::NTuple{N,Int}) where {N}
+    @inbounds for d in 1:N
+        if I[d] < 1 || I[d] >= nnodes[d]
+            return false
+        end
+    end
+    return true
+end
+
+@inline function _shift_index(I::CartesianIndex{N}, d::Int, δ::Int) where {N}
+    return CartesianIndex(ntuple(k -> (k == d ? I[k] + δ : I[k]), N))
+end
+
+@inline function _is_active_physical(
+    cap::AssembledCapacity{N,T},
+    I::CartesianIndex{N},
+) where {N,T}
+    _is_physical_cart_index(I, cap.nnodes) || return false
+    li = LinearIndices(cap.nnodes)
+    i = li[I]
+    v = cap.buf.V[i]
+    return isfinite(v) && v > zero(T)
+end
+
+function _pressure_boundary_value_terms(
+    cap_p::AssembledCapacity{N,T},
+    pomega::UnitRange{Int},
+    I::CartesianIndex{N},
+    d::Int,
+    is_high::Bool,
+    sign_n::Real,
+) where {N,T}
+    cols = Int[]
+    vals = T[]
+    inward = is_high ? -1 : 1
+    li = LinearIndices(cap_p.nnodes)
+
+    _is_active_physical(cap_p, I) || return cols, vals
+    i1 = li[I]
+    I2 = _shift_index(I, d, inward)
+    if _is_active_physical(cap_p, I2)
+        i2 = li[I2]
+        _iadd_term!(cols, vals, pomega[i1], convert(T, -sign_n) * convert(T, 1.5))
+        _iadd_term!(cols, vals, pomega[i2], convert(T, -sign_n) * convert(T, -0.5))
+    else
+        _iadd_term!(cols, vals, pomega[i1], convert(T, -sign_n))
+    end
+    return cols, vals
+end
+
+function _normal_derivative_terms_collocated(
+    cap_u::AssembledCapacity{N,T},
+    row_uomega::UnitRange{Int},
+    I::CartesianIndex{N},
+    d::Int,
+    is_high::Bool,
+) where {N,T}
+    cols = Int[]
+    vals = T[]
+    li = LinearIndices(cap_u.nnodes)
+    Δd = abs(cap_u.xyz[d][2] - cap_u.xyz[d][1])
+    inward = is_high ? -1 : 1
+
+    I1 = I
+    I2 = _shift_index(I1, d, inward)
+    I3 = _shift_index(I2, d, inward)
+    if _is_active_physical(cap_u, I1) && _is_active_physical(cap_u, I2) && _is_active_physical(cap_u, I3)
+        i1 = li[I1]
+        i2 = li[I2]
+        i3 = li[I3]
+        s = inv(convert(T, 2) * Δd)
+        _iadd_term!(cols, vals, row_uomega[i1], convert(T, 3) * s)
+        _iadd_term!(cols, vals, row_uomega[i2], convert(T, -4) * s)
+        _iadd_term!(cols, vals, row_uomega[i3], s)
+        return cols, vals
+    end
+    if _is_active_physical(cap_u, I1) && _is_active_physical(cap_u, I2)
+        i1 = li[I1]
+        i2 = li[I2]
+        s = inv(Δd)
+        _iadd_term!(cols, vals, row_uomega[i1], s)
+        _iadd_term!(cols, vals, row_uomega[i2], -s)
+    end
+    return cols, vals
+end
+
+function _normal_derivative_terms_halfshifted(
+    cap_u::AssembledCapacity{N,T},
+    row_uomega::UnitRange{Int},
+    I::CartesianIndex{N},
+    d::Int,
+    is_high::Bool,
+) where {N,T}
+    cols = Int[]
+    vals = T[]
+    li = LinearIndices(cap_u.nnodes)
+    Δd = abs(cap_u.xyz[d][2] - cap_u.xyz[d][1])
+    inward = is_high ? -1 : 1
+
+    I1 = I
+    I2 = _shift_index(I1, d, inward)
+    I3 = _shift_index(I2, d, inward)
+    if _is_active_physical(cap_u, I1) && _is_active_physical(cap_u, I2) && _is_active_physical(cap_u, I3)
+        i1 = li[I1]
+        i2 = li[I2]
+        i3 = li[I3]
+        s = inv(Δd)
+        _iadd_term!(cols, vals, row_uomega[i1], convert(T, 2) * s)
+        _iadd_term!(cols, vals, row_uomega[i2], convert(T, -3) * s)
+        _iadd_term!(cols, vals, row_uomega[i3], s)
+        return cols, vals
+    end
+    if _is_active_physical(cap_u, I1) && _is_active_physical(cap_u, I2)
+        i1 = li[I1]
+        i2 = li[I2]
+        s = inv(Δd)
+        _iadd_term!(cols, vals, row_uomega[i1], s)
+        _iadd_term!(cols, vals, row_uomega[i2], -s)
+    end
+    return cols, vals
+end
+
+function _tangential_derivative_terms_on_boundary_layer(
+    cap_ud::AssembledCapacity{N,T},
+    row_udomega::UnitRange{Int},
+    cap_ref::AssembledCapacity{N,T},
+    I_ref::CartesianIndex{N},
+    d::Int,
+    is_high::Bool,
+    dir::Int,
+    x_d::T,
+) where {N,T}
+    cols = Int[]
+    vals = T[]
+    li_ud = LinearIndices(cap_ud.nnodes)
+    li_ref = LinearIndices(cap_ref.nnodes)
+
+    iref = li_ref[I_ref]
+    x0 = cap_ref.C_ω[iref][dir]
+
+    I_base = CartesianIndex(ntuple(k -> begin
+        if k == d
+            is_high ? (cap_ud.nnodes[k] - 1) : 1
+        else
+            I_ref[k]
+        end
+    end, N))
+    _is_physical_cart_index(I_base, cap_ud.nnodes) || return cols, vals
+
+    idx = Int[]
+    xcoord = T[]
+    nphys = cap_ud.nnodes[dir] - 1
+    for j in 1:nphys
+        Ij = CartesianIndex(ntuple(k -> (k == dir ? j : I_base[k]), N))
+        _is_active_physical(cap_ud, Ij) || continue
+        ij = li_ud[Ij]
+        push!(idx, j)
+        push!(xcoord, cap_ud.C_ω[ij][dir])
+    end
+
+    length(idx) >= 2 || return cols, vals
+
+    dist = abs.(xcoord .- x0)
+    perm = sortperm(dist)
+    nst = min(3, length(perm))
+    keep = perm[1:nst]
+    js = idx[keep]
+    xs = xcoord[keep]
+
+    # Keep monotone x-order for a stable tiny Vandermonde.
+    p = sortperm(xs)
+    js = js[p]
+    xs = xs[p]
+
+    nst_used = length(xs)
+    M = Matrix{T}(undef, nst_used, nst_used)
+    rhs = zeros(T, nst_used)
+    rhs[min(2, nst_used)] = one(T)
+    @inbounds for r in 1:nst_used
+        for c in 1:nst_used
+            M[r, c] = (xs[c] - x0)^(r - 1)
+        end
+    end
+    coeff_t = M \ rhs
+
+    # Differentiate the boundary trace u_n|_{x=x_d} tangentially.
+    inward = is_high ? -1 : 1
+    tol = sqrt(eps(T)) * max(one(T), abs(x_d))
+    @inbounds for (j, c_t) in zip(js, coeff_t)
+        I1 = CartesianIndex(ntuple(k -> (k == dir ? j : I_base[k]), N))
+        _is_active_physical(cap_ud, I1) || continue
+        i1 = li_ud[I1]
+        x1 = cap_ud.C_ω[i1][d]
+        dist = abs(x_d - x1)
+
+        if dist <= tol
+            _iadd_term!(cols, vals, row_udomega[i1], c_t)
+            continue
+        end
+
+        I2 = _shift_index(I1, d, inward)
+        if !_is_active_physical(cap_ud, I2)
+            _iadd_term!(cols, vals, row_udomega[i1], c_t)
+            continue
+        end
+        i2 = li_ud[I2]
+        x2 = cap_ud.C_ω[i2][d]
+        denom = x1 - x2
+        if abs(denom) <= eps(T)
+            _iadd_term!(cols, vals, row_udomega[i1], c_t)
+            continue
+        end
+        c1 = (x_d - x2) / denom
+        c2 = (x_d - x1) / (x2 - x1)
+        _iadd_term!(cols, vals, row_udomega[i1], c_t * c1)
+        _iadd_term!(cols, vals, row_udomega[i2], c_t * c2)
+    end
+    return cols, vals
+end
+
+function _traction_component(
+    side_bc::AbstractBoundary,
+    comp::Int,
+    side::Symbol,
+    xb::SVector{N,T},
+    t::T,
+    ::Val{N},
+    ::Type{T},
+) where {N,T}
+    d, _, sign_n = side_info(side, N)
+    if side_bc isa Traction
+        τ = eval_bc(side_bc.value, xb, t)
+        if τ isa Number
+            return convert(T, τ)
+        end
+        return convert(T, τ[comp])
+    elseif side_bc isa PressureOutlet
+        pout = convert(T, eval_bc(side_bc.value, xb, t))
+        return comp == d ? (-convert(T, sign_n) * pout) : zero(T)
+    elseif side_bc isa DoNothing
+        return zero(T)
+    end
+    throw(ArgumentError("unsupported traction boundary type $(typeof(side_bc)) on side `$side`"))
+end
+
+function _apply_traction_box_bc_block!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    gridp::CartesianGrid{N,T},
+    cap_p::AssembledCapacity{N,T},
+    cap_u::NTuple{N,AssembledCapacity{N,T}},
+    μ::T,
+    bc_u::NTuple{N,BorderConditions},
+    row_uomega::NTuple{N,UnitRange{Int}},
+    pomega::UnitRange{Int},
+    periodic::NTuple{N,Bool},
+    t::T,
+    locked_rows::BitVector,
+) where {N,T}
+    pairs = _side_pairs(N)
+    for d in 1:N
+        periodic[d] && continue
+        side_lo, side_hi = pairs[d]
+        for side in (side_lo, side_hi)
+            _side_uses_traction_bc(bc_u, side, T) || continue
+            side_bcs = _side_velocity_bcs(bc_u, side, T)
+            _, is_high, sign_n = side_info(side, N)
+            x_d = is_high ? gridp.hc[d] : gridp.lc[d]
+
+            @inbounds for comp in 1:N
+                side_bc = side_bcs[comp]
+                _is_stokes_traction_bc(side_bc) || continue
+
+                cap_comp = cap_u[comp]
+                cap_d = cap_u[d]
+                cap_comp.nnodes == cap_p.nnodes ||
+                    throw(ArgumentError("velocity/pressure capacities must share nnodes on traction side `$side`"))
+                cap_d.nnodes == cap_comp.nnodes ||
+                    throw(ArgumentError("velocity capacities must share nnodes for traction coupling"))
+
+                li = LinearIndices(cap_comp.nnodes)
+                for I in each_boundary_cell(cap_comp.nnodes, side)
+                    i = li[I]
+                    Vi = cap_comp.buf.V[i]
+                    Aface = cap_comp.buf.A[d][i]
+                    if !(isfinite(Vi) && Vi > zero(T) && isfinite(Aface) && Aface > zero(T))
+                        continue
+                    end
+
+                    x = cap_comp.C_ω[i]
+                    xb = SVector{N,T}(ntuple(k -> (k == d ? x_d : x[k]), N))
+                    rhs = _traction_component(side_bc, comp, side, xb, t, Val(N), T)
+
+                    cols = Int[]
+                    vals = T[]
+                    if comp == d
+                        pcols, pvals = _pressure_boundary_value_terms(cap_p, pomega, I, d, is_high, sign_n)
+                        _append_scaled_terms!(cols, vals, pcols, pvals, one(T))
+                        dist = abs(x[d] - x_d)
+                        tol = sqrt(eps(T)) * max(one(T), abs(x_d))
+                        if dist <= tol
+                            ncols, nvals = _normal_derivative_terms_collocated(cap_comp, row_uomega[comp], I, d, is_high)
+                        else
+                            ncols, nvals = _normal_derivative_terms_halfshifted(cap_comp, row_uomega[comp], I, d, is_high)
+                        end
+                        _append_scaled_terms!(cols, vals, ncols, nvals, convert(T, 2) * μ)
+                    else
+                        ncols, nvals = _normal_derivative_terms_halfshifted(cap_comp, row_uomega[comp], I, d, is_high)
+                        _append_scaled_terms!(cols, vals, ncols, nvals, μ)
+                        tcols, tvals = _tangential_derivative_terms_on_boundary_layer(
+                            cap_d,
+                            row_uomega[d],
+                            cap_comp,
+                            I,
+                            d,
+                            is_high,
+                            comp,
+                            x_d,
+                        )
+                        _append_scaled_terms!(cols, vals, tcols, tvals, μ)
+                    end
+
+                    isempty(cols) && continue
+                    row = row_uomega[comp][i]
+                    _set_sparse_row!(A, b, row, cols, vals, rhs)
+                    locked_rows[row] = true
+                end
+            end
+        end
+    end
+
+    return A, b
+end
+
+function _apply_traction_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::StokesModelMono{N,T},
+    t::T,
+) where {N,T}
+    locked_rows = falses(size(A, 1))
+    _apply_traction_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        model.cap_p,
+        model.cap_u,
+        model.mu,
+        model.bc_u,
+        model.layout.uomega,
+        model.layout.pomega,
+        model.periodic,
+        t,
+        locked_rows,
+    )
+    return locked_rows
+end
+
+function _apply_traction_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::StokesModelTwoPhase{N,T},
+    t::T,
+) where {N,T}
+    locked_rows = falses(size(A, 1))
+    _apply_traction_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        model.cap_p1,
+        model.cap_u1,
+        model.mu1,
+        model.bc_u,
+        model.layout.uomega1,
+        model.layout.pomega1,
+        model.periodic,
+        t,
+        locked_rows,
+    )
+    _apply_traction_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        model.cap_p2,
+        model.cap_u2,
+        model.mu2,
+        model.bc_u,
+        model.layout.uomega2,
+        model.layout.pomega2,
+        model.periodic,
+        t,
+        locked_rows,
+    )
+    return locked_rows
+end
+
+function _apply_traction_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::MovingStokesModelMono{N,T},
+    t::T,
+) where {N,T}
+    isnothing(model.cap_p_end) && throw(ArgumentError("moving model pressure end-capacity cache is not built"))
+    isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
+    cap_p_end = something(model.cap_p_end)
+    cap_u_end = something(model.cap_u_end)
+    locked_rows = falses(size(A, 1))
+    _apply_traction_box_bc_block!(
+        A,
+        b,
+        model.gridp,
+        cap_p_end,
+        cap_u_end,
+        model.mu,
+        model.bc_u,
+        model.layout.uomega,
+        model.layout.pomega,
+        model.periodic,
+        t,
+        locked_rows,
+    )
+    return locked_rows
+end
+
 function _apply_component_velocity_box_bc!(
     A::SparseMatrixCSC{T,Int},
     b::Vector{T},
@@ -690,6 +1203,7 @@ function _apply_component_velocity_box_bc!(
     var_uomega::UnitRange{Int},
     row_uomega::UnitRange{Int},
     t::T,
+    locked_rows::Union{Nothing,BitVector}=nothing,
 ) where {N,T}
     validate_borderconditions!(bc, N)
     li = LinearIndices(cap.nnodes)
@@ -697,7 +1211,8 @@ function _apply_component_velocity_box_bc!(
 
     for (side, side_bc) in bc.borders
         side_bc isa AbstractBoundary ||
-            throw(ArgumentError("velocity border condition `$side` only supports Dirichlet/Neumann/Periodic"))
+            throw(ArgumentError("velocity border condition `$side` only supports valid boundary types"))
+        _is_stokes_traction_bc(side_bc) && continue
         d, is_high, _ = side_info(side, N)
         side_bc isa Periodic && continue
 
@@ -718,6 +1233,9 @@ function _apply_component_velocity_box_bc!(
             x = cap.C_ω[i]
             xb = SVector{N,T}(ntuple(k -> (k == d ? x_d : x[k]), N))
             row = row_uomega[i]
+            if !isnothing(locked_rows) && locked_rows[row]
+                continue
+            end
 
             if side_bc isa Dirichlet
                 val = convert(T, eval_bc(side_bc.value, xb, t))
@@ -746,7 +1264,13 @@ function _apply_component_velocity_box_bc!(
     return A, b
 end
 
-function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelMono{N,T}, t::T) where {N,T}
+function _apply_velocity_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::StokesModelMono{N,T},
+    t::T;
+    locked_rows::Union{Nothing,BitVector}=nothing,
+) where {N,T}
     layout = model.layout
     for d in 1:N
         _apply_component_velocity_box_bc!(
@@ -761,12 +1285,19 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
             layout.uomega[d],
             layout.uomega[d],
             t,
+            locked_rows,
         )
     end
     return A, b
 end
 
-function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelTwoPhase{N,T}, t::T) where {N,T}
+function _apply_velocity_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::StokesModelTwoPhase{N,T},
+    t::T;
+    locked_rows::Union{Nothing,BitVector}=nothing,
+) where {N,T}
     layout = model.layout
     for d in 1:N
         _apply_component_velocity_box_bc!(
@@ -781,6 +1312,7 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
             layout.uomega1[d],
             layout.uomega1[d],
             t,
+            locked_rows,
         )
         _apply_component_velocity_box_bc!(
             A,
@@ -794,12 +1326,19 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
             layout.uomega2[d],
             layout.uomega2[d],
             t,
+            locked_rows,
         )
     end
     return A, b
 end
 
-function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::MovingStokesModelMono{N,T}, t::T) where {N,T}
+function _apply_velocity_box_bc!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::MovingStokesModelMono{N,T},
+    t::T;
+    locked_rows::Union{Nothing,BitVector}=nothing,
+) where {N,T}
     isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
     cap_u_end = something(model.cap_u_end)
     layout = model.layout
@@ -816,6 +1355,7 @@ function _apply_velocity_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
             layout.uomega[d],
             layout.uomega[d],
             t,
+            locked_rows,
         )
     end
     return A, b
@@ -847,6 +1387,7 @@ function _apply_pressure_box_bc_block!(
     cap::AssembledCapacity{N,T},
     pomega::UnitRange{Int},
     periodic::NTuple{N,Bool},
+    bc_u::NTuple{N,BorderConditions},
     bc_p::BorderConditions,
     t::T,
 ) where {N,T}
@@ -858,6 +1399,7 @@ function _apply_pressure_box_bc_block!(
         periodic[d] && continue
         side_lo, side_hi = pairs[d]
         for side in (side_lo, side_hi)
+            _side_uses_traction_bc(bc_u, side, T) && continue
             side_bc = _pressure_side_bc(bc_p, side, T)
             side_bc isa Periodic && continue
             Δd = abs(cap.xyz[d][2] - cap.xyz[d][1])
@@ -928,7 +1470,7 @@ function _apply_pressure_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
     model.strong_wall_bc || return A, b
     isnothing(model.bc_p) && return A, b
     return _apply_pressure_box_bc_block!(
-        A, b, model.gridp, model.cap_p, model.layout.pomega, model.periodic, model.bc_p, t
+        A, b, model.gridp, model.cap_p, model.layout.pomega, model.periodic, model.bc_u, model.bc_p, t
     )
 end
 
@@ -936,10 +1478,10 @@ function _apply_pressure_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
     model.strong_wall_bc || return A, b
     isnothing(model.bc_p) && return A, b
     _apply_pressure_box_bc_block!(
-        A, b, model.gridp, model.cap_p1, model.layout.pomega1, model.periodic, model.bc_p, t
+        A, b, model.gridp, model.cap_p1, model.layout.pomega1, model.periodic, model.bc_u, model.bc_p, t
     )
     _apply_pressure_box_bc_block!(
-        A, b, model.gridp, model.cap_p2, model.layout.pomega2, model.periodic, model.bc_p, t
+        A, b, model.gridp, model.cap_p2, model.layout.pomega2, model.periodic, model.bc_u, model.bc_p, t
     )
     return A, b
 end
@@ -950,7 +1492,7 @@ function _apply_pressure_box_bc!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model:
     isnothing(model.cap_p_end) && throw(ArgumentError("moving model pressure end-capacity cache is not built"))
     cap_p_end = something(model.cap_p_end)
     return _apply_pressure_box_bc_block!(
-        A, b, model.gridp, cap_p_end, model.layout.pomega, model.periodic, model.bc_p, t
+        A, b, model.gridp, cap_p_end, model.layout.pomega, model.periodic, model.bc_u, model.bc_p, t
     )
 end
 
@@ -1639,7 +2181,8 @@ function assemble_steady!(sys::LinearSystem{T}, model::StokesModelTwoPhase{N,T},
     b = zeros(T, nsys)
 
     _assemble_core!(A, b, model, blocks, t)
-    _apply_velocity_box_bc!(A, b, model, t)
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t)
+    _apply_velocity_box_bc!(A, b, model, t; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t)
     _apply_pressure_gauge!(A, b, model)
 
@@ -1722,7 +2265,8 @@ function assemble_unsteady!(
     end
 
     _assemble_interface_traction_rows!(A, b, model, blocks, t_next)
-    _apply_velocity_box_bc!(A, b, model, t_next)
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
+    _apply_velocity_box_bc!(A, b, model, t_next; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)
 
@@ -1743,7 +2287,8 @@ function assemble_steady!(sys::LinearSystem{T}, model::StokesModelMono{N,T}, t::
     b = zeros(T, nsys)
 
     _assemble_core!(A, b, model, blocks, t)
-    _apply_velocity_box_bc!(A, b, model, t)
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t)
+    _apply_velocity_box_bc!(A, b, model, t; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t)
     _apply_pressure_gauge!(A, b, model)
 
@@ -1813,7 +2358,8 @@ function assemble_unsteady!(
         _insert_block!(A, layout.pomega, layout.ugamma[d], blocks.div_gamma[d])
     end
 
-    _apply_velocity_box_bc!(A, b, model, t_next)
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
+    _apply_velocity_box_bc!(A, b, model, t_next; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)
 
@@ -1943,7 +2489,8 @@ function assemble_unsteady_moving!(
         _insert_block!(A, layout.pomega, layout.ugamma[d], div_gamma[d])
     end
 
-    _apply_velocity_box_bc!(A, b, model, t_next)
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
+    _apply_velocity_box_bc!(A, b, model, t_next; locked_rows=traction_locked_rows)
     _apply_pressure_box_bc!(A, b, model, t_next)
     _apply_pressure_gauge!(A, b, model)
 
@@ -2298,6 +2845,7 @@ function StokesModelMono(
     pflags = _periodic_velocity_flags(bc_u)
     pflags == periodic_flags(bc_u[1], N) || throw(ArgumentError("invalid periodic flags"))
     bc_p = _validate_pressure_bc(bc_p, pflags)
+    _validate_stokes_box_bcs!(bc_u, bc_p, pflags, T)
 
     gridp = CartesianGrid(
         ntuple(d -> cap_p.xyz[d][1], N),
@@ -2348,6 +2896,7 @@ function StokesModelMono(
 ) where {N,T}
     pflags = _periodic_velocity_flags(bc_u)
     bc_p = _validate_pressure_bc(bc_p, pflags)
+    _validate_stokes_box_bcs!(bc_u, bc_p, pflags, T)
     gridu = staggered_velocity_grids(gridp)
 
     mp = geometric_moments(body, grid1d(gridp), T, nan; method=geom_method)
@@ -2403,6 +2952,7 @@ function MovingStokesModelMono(
 ) where {N,T}
     pflags = _periodic_velocity_flags(bc_u)
     bc_p = _validate_pressure_bc(bc_p, pflags)
+    _validate_stokes_box_bcs!(bc_u, bc_p, pflags, T)
     gridu = staggered_velocity_grids(gridp)
     nt = prod(gridp.n)
     layout = StokesLayout(nt, Val(N))
@@ -2496,6 +3046,7 @@ function StokesModelTwoPhase(
 
     pflags = _periodic_velocity_flags(bc_u)
     bc_p = _validate_pressure_bc(bc_p, pflags)
+    _validate_stokes_box_bcs!(bc_u, bc_p, pflags, T)
 
     check_interface && _check_two_phase_interface_consistency(cap_p1, cap_p2)
 
@@ -2561,6 +3112,7 @@ function StokesModelTwoPhase(
 ) where {N,T}
     pflags = _periodic_velocity_flags(bc_u)
     bc_p = _validate_pressure_bc(bc_p, pflags)
+    _validate_stokes_box_bcs!(bc_u, bc_p, pflags, T)
     gridu = staggered_velocity_grids(gridp)
 
     body2 = (x...) -> -body(x...)
