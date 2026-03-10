@@ -7,8 +7,10 @@ Primary exported symbols
 - `assemble_steady!`, `assemble_unsteady!`, `solve_steady!`, `solve_unsteady!`
 - `assemble_unsteady_moving!`, `solve_unsteady_moving!`
 - `embedded_boundary_quantities`, `embedded_boundary_traction`, `embedded_boundary_stress`, `integrated_embedded_force`
-- `RigidBodyState`, `RigidBodyParams`, `Circle`, `Sphere`, `StokesFSIProblem`
-- `endtime_static_model`, `step_fsi!`, `simulate_fsi!`
+- `RigidBodyState`, `RigidBodyParams`, `RigidBodyState2D`, `RigidBodyParams2D`
+- `Circle`, `Sphere`, `Ellipse`, `StokesFSIProblem`, `StokesFSIProblem2D`
+- `endtime_static_model`, `step_fsi!`, `simulate_fsi!`, `step_fsi_rotation!`, `simulate_fsi_rotation!`
+- `rigid_velocity_2d`, `rigid_velocity`, `rigid_cut_bc_tuple_2d`, `rigid_body_levelset`
 
 Typical construction
 
@@ -35,3 +37,31 @@ Notes
 - `MovingStokesModelMono` uses per-component cut Dirichlet data through `bc_cut_u`.
 - `StokesModelTwoPhase` reuses `ugamma` rows as traction-balance equations (no separate `bc_cut`).
 - Embedded-boundary utilities return pressure-grid cut-cell stress/traction fields and integrated force splits (pressure/viscous).
+
+**Canonical docstrings**
+
+```@docs
+PenguinStokes.Circle
+PenguinStokes.Sphere
+PenguinStokes.Ellipse
+PenguinStokes.volume
+PenguinStokes.sdf
+PenguinStokes.body_inertia
+PenguinStokes.RigidBodyState
+PenguinStokes.RigidBodyParams
+PenguinStokes.RigidBodyState2D
+PenguinStokes.RigidBodyParams2D
+PenguinStokes.external_force
+PenguinStokes.external_torque
+PenguinStokes.StokesFSIProblem
+PenguinStokes.step_fsi!
+PenguinStokes.simulate_fsi!
+PenguinStokes.StokesFSIProblem2D
+PenguinStokes.step_fsi_rotation!
+PenguinStokes.simulate_fsi_rotation!
+PenguinStokes.endtime_static_model
+PenguinStokes.embedded_boundary_quantities
+PenguinStokes.embedded_boundary_traction
+PenguinStokes.embedded_boundary_stress
+PenguinStokes.integrated_embedded_force
+```

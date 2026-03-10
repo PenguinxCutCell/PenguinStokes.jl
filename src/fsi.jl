@@ -443,6 +443,12 @@ function StokesFSIProblem(
     )
 end
 
+"""
+    StokesFSIProblem2D
+
+2D rigid-body FSI wrapper around `MovingStokesModelMono` with translation and scalar
+rotation state (`X`, `V`, `theta`, `omega`).
+"""
 mutable struct StokesFSIProblem2D{T,FT,S<:AbstractRigidShape}
     model::MovingStokesModelMono{2,T,FT,Any}
     state::RigidBodyState2D{T}
