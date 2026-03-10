@@ -1848,5 +1848,6 @@ end
 end
 
 include("moving_boundary_stokes_tests.jl")
+include("fsi_tests.jl")
 include("test_outlet_row_equivalence.jl")
 include("test_traction_box_debug.jl")
