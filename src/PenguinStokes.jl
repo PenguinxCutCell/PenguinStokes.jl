@@ -17,8 +17,10 @@ export MovingStokesModelMono
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
 export assemble_unsteady_moving!, solve_unsteady_moving!
 export embedded_boundary_quantities, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
-export RigidBodyState, RigidBodyParams, Circle, Sphere, StokesFSIProblem
-export endtime_static_model, step_fsi!, simulate_fsi!
+export RigidBodyState, RigidBodyParams, Circle, Sphere, Ellipse, StokesFSIProblem
+export RigidBodyState2D, RigidBodyParams2D, StokesFSIProblem2D
+export endtime_static_model, step_fsi!, simulate_fsi!, step_fsi_rotation!, simulate_fsi_rotation!
+export rigid_velocity_2d, rigid_velocity, rigid_cut_bc_tuple_2d, rigid_body_levelset
 
 abstract type AbstractPressureGauge end
 
