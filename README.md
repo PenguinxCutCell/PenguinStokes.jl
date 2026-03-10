@@ -78,6 +78,8 @@ Key verification scripts:
 - `examples/13_unsteady_moving_body_translation.jl`: one-phase prescribed moving embedded boundary with oscillatory rigid translation and trace-row checks.
 - `examples/14_unsteady_oscillating_cylinder.jl`: one-phase oscillating embedded cylinder with force/torque history output.
 - `examples/17_fsi_free_falling_circle.jl`: translation-only rigid-body FSI free-fall demo (ODE-coupled moving-boundary Stokes).
+- `examples/18_fsi_drag_calibration_circle.jl`: periodic-box drag calibration for a moving circle (`F(U)`, `F(2U)`, `F(-U)` and `ζ_num`).
+- `examples/19_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy exponential velocity decay check against calibrated-drag ODE.
 
 ## FSI (v0)
 

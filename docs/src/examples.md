@@ -17,6 +17,8 @@ julia --project=. examples/14_unsteady_oscillating_cylinder.jl
 julia --project=. examples/15_channel_pressure_outlet_traction.jl
 julia --project=. examples/16_channel_poiseuille_pressure_outlet.jl
 julia --project=. examples/17_fsi_free_falling_circle.jl
+julia --project=. examples/18_fsi_drag_calibration_circle.jl
+julia --project=. examples/19_fsi_neutral_buoyancy_decay.jl
 ```
 
 General test command:

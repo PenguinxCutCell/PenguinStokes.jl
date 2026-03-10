@@ -225,6 +225,34 @@ function StokesFSIProblem(
     )
 end
 
+function _advance_rigid_translation!(
+    state::RigidBodyState{N,T},
+    params::RigidBodyParams{N,T},
+    Fhydro::SVector{N,T},
+    dt::T;
+    ode_scheme::Symbol=:symplectic_euler,
+) where {N,T}
+    dt > zero(T) || throw(ArgumentError("dt must be positive"))
+    Fext = external_force(params)
+    Xn = state.X
+    Vn = state.V
+
+    if ode_scheme == :symplectic_euler
+        Vn1 = Vn + (dt / params.m) * (Fext + Fhydro)
+        Xn1 = Xn + dt * Vn1
+        state.V = Vn1
+        state.X = Xn1
+    elseif ode_scheme == :forward_euler
+        Xn1 = Xn + dt * Vn
+        Vn1 = Vn + (dt / params.m) * (Fext + Fhydro)
+        state.V = Vn1
+        state.X = Xn1
+    else
+        throw(ArgumentError("unsupported ODE scheme `$ode_scheme` (use :symplectic_euler or :forward_euler)"))
+    end
+    return (X=state.X, V=state.V, Fext=Fext, Fhydro=Fhydro)
+end
+
 """
     step_fsi!(fsi; t, dt, fluid_scheme=:CN, ode_scheme=:symplectic_euler)
 
@@ -272,31 +300,17 @@ function step_fsi!(
     )
 
     Fhydro = fsi.force_sign * SVector{N,T}(Tuple(q.force))
-    Fext = external_force(fsi.params)
-
-    if ode_scheme == :symplectic_euler
-        Vn1 = Vn + (dt / fsi.params.m) * (Fext + Fhydro)
-        Xn1 = Xn + dt * Vn1
-        fsi.state.V = Vn1
-        fsi.state.X = Xn1
-    elseif ode_scheme == :forward_euler
-        Xn1 = Xn + dt * Vn
-        Vn1 = Vn + (dt / fsi.params.m) * (Fext + Fhydro)
-        fsi.state.V = Vn1
-        fsi.state.X = Xn1
-    else
-        throw(ArgumentError("unsupported ODE scheme `$ode_scheme` (use :symplectic_euler or :forward_euler)"))
-    end
+    ode = _advance_rigid_translation!(fsi.state, fsi.params, Fhydro, dt; ode_scheme=ode_scheme)
 
     fsi.xprev .= sys.x
 
     return (
         sys=sys,
         force=q,
-        X=fsi.state.X,
-        V=fsi.state.V,
-        Fhydro=Fhydro,
-        Fext=Fext,
+        X=ode.X,
+        V=ode.V,
+        Fhydro=ode.Fhydro,
+        Fext=ode.Fext,
         t=tnext,
     )
 end
