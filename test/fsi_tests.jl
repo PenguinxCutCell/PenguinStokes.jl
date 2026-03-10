@@ -10,6 +10,12 @@ fsi_periodic_2d() = BorderConditions(
     bottom=Periodic(), top=Periodic(),
 )
 
+fsi_periodic_3d() = BorderConditions(
+    ; left=Periodic(), right=Periodic(),
+    bottom=Periodic(), top=Periodic(),
+    backward=Periodic(), forward=Periodic(),
+)
+
 function fsi_single_slab_force(
     U::SVector{2,T};
     n::Int=17,
@@ -69,6 +75,35 @@ function fsi_single_slab_force_torque_rotation(
     sm = endtime_static_model(model)
     q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(X0))
     return SVector{2,Float64}(Tuple(q.force)), q.torque, sys, model
+end
+
+function fsi_single_slab_force_3d(
+    U::SVector{3,T};
+    n::Int=11,
+    dt::T=T(0.03),
+    R::T=T(0.16),
+    center::SVector{3,T}=SVector{3,T}(T(0.5), T(0.5), T(0.5)),
+) where {T}
+    grid = CartesianGrid((zero(T), zero(T), zero(T)), (one(T), one(T), one(T)), (n, n, n))
+    bc = fsi_periodic_3d()
+    shape = Sphere(R)
+    body(x, y, z, t) = shape.R - sqrt((x - center[1])^2 + (y - center[2])^2 + (z - center[3])^2)
+
+    model = MovingStokesModelMono(
+        grid,
+        body,
+        one(T),
+        one(T);
+        bc_u=(bc, bc, bc),
+        force=(zero(T), zero(T), zero(T)),
+        bc_cut_u=(Dirichlet(U[1]), Dirichlet(U[2]), Dirichlet(U[3])),
+    )
+
+    xprev = zeros(T, last(model.layout.pomega))
+    sys = solve_unsteady_moving!(model, xprev; t=zero(T), dt=dt, scheme=:CN)
+    sm = endtime_static_model(model)
+    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(center))
+    return SVector{3,T}(Tuple(q.force)), q.torque, sys
 end
 
 @testset "FSI translation wrapper: force linearity and odd symmetry (2D)" begin
@@ -231,4 +266,117 @@ end
     # At t=dt, lab-frame point on initial major-axis endpoint should not remain on boundary.
     phi_end = fsi.model.body(X0[1] + shape.a, X0[2], dt)
     @test abs(phi_end) > 1e-5
+end
+
+@testset "FSI rigid velocity helpers: 3D + orientation orthonormality" begin
+    x = SVector(2.0, -1.0, 4.0)
+    X = SVector(0.5, 1.5, -0.5)
+    V = SVector(1.0, -2.0, 0.75)
+    Omega = SVector(0.2, -0.3, 0.4)
+
+    u = rigid_boundary_velocity(x, X, V, Omega)
+    uref = V + SVector(
+        Omega[2] * (x[3] - X[3]) - Omega[3] * (x[2] - X[2]),
+        Omega[3] * (x[1] - X[1]) - Omega[1] * (x[3] - X[3]),
+        Omega[1] * (x[2] - X[2]) - Omega[2] * (x[1] - X[1]),
+    )
+    @test isapprox(norm(u - uref), 0.0; atol=1e-12)
+
+    ori = PenguinStokes.identity_orientation(Val(3), Float64)
+    for _ in 1:100
+        ori = PenguinStokes.advance_orientation(ori, Omega, 0.01)
+    end
+    I3 = [1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0]
+    @test norm(Matrix(PenguinStokes.rotation_matrix(ori)' * PenguinStokes.rotation_matrix(ori)) - I3) < 1e-10
+end
+
+@testset "FSI sphere/circle geometry invariance under rotation" begin
+    cshape = Circle(0.2)
+    s2a = (_t) -> RigidBodyState2D(SVector(0.5, 0.5), SVector(0.0, 0.0); theta=0.0, omega=0.0)
+    s2b = (_t) -> RigidBodyState2D(SVector(0.5, 0.5), SVector(0.0, 0.0); theta=1.37, omega=0.0)
+    phi2a = rigid_body_levelset(cshape, s2a)
+    phi2b = rigid_body_levelset(cshape, s2b)
+    @test isapprox(phi2a(0.6, 0.4, 0.0), phi2b(0.6, 0.4, 0.0); atol=1e-12)
+
+    sshape = Sphere(0.2)
+    Qrot = PenguinStokes.advance_orientation(
+        PenguinStokes.identity_orientation(Val(3), Float64),
+        SVector(0.3, -0.2, 0.1),
+        1.0,
+    ).Q
+    s3a = (_t) -> RigidBodyState3D(SVector(0.5, 0.5, 0.5), SVector(0.0, 0.0, 0.0))
+    s3b = (_t) -> RigidBodyState3D(SVector(0.5, 0.5, 0.5), SVector(0.0, 0.0, 0.0); Q=Qrot, Omega=SVector(0.0, 0.0, 0.0))
+    phi3a = rigid_body_levelset(sshape, s3a)
+    phi3b = rigid_body_levelset(sshape, s3b)
+    @test isapprox(phi3a(0.58, 0.44, 0.61, 0.0), phi3b(0.58, 0.44, 0.61, 0.0); atol=1e-12)
+end
+
+@testset "FSI 3D prescribed sphere drag: linearity and odd symmetry" begin
+    F1, _, _ = fsi_single_slab_force_3d(SVector(0.0, 0.0, 1.0))
+    F2, _, _ = fsi_single_slab_force_3d(SVector(0.0, 0.0, 2.0))
+    Fm, _, _ = fsi_single_slab_force_3d(SVector(0.0, 0.0, -1.0))
+
+    @test isapprox(F2[1], 2 * F1[1]; rtol=4e-2, atol=2e-6)
+    @test isapprox(F2[2], 2 * F1[2]; rtol=4e-2, atol=2e-6)
+    @test isapprox(F2[3], 2 * F1[3]; rtol=4e-2, atol=2e-6)
+    @test isapprox(Fm[3], -F1[3]; rtol=4e-2, atol=2e-6)
+end
+
+@testset "FSI strong coupling: convergence and split consistency at small dt" begin
+    dt = 0.01
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bc = fsi_periodic_2d()
+    shape = Circle(0.12)
+    state0 = RigidBodyState((0.5, 0.5), (0.08, 0.0))
+    body0(x, y, t) = shape.R - hypot(x - state0.X[1], y - state0.X[2])
+
+    function build_problem(state)
+        model = MovingStokesModelMono(
+            grid,
+            body0,
+            1.0,
+            1.0;
+            bc_u=(bc, bc),
+            force=(0.0, 0.0),
+            bc_cut_u=(Dirichlet(0.0), Dirichlet(0.0)),
+        )
+        params = RigidBodyParams(
+            1.0,
+            1.0,
+            shape,
+            SVector(0.0, 0.0);
+            rho_fluid=0.0,
+            buoyancy=false,
+        )
+        return StokesFSIProblem(
+            model,
+            state,
+            params;
+            pressure_reconstruction=:linear,
+            force_sign=1.0,
+            torque_sign=1.0,
+        )
+    end
+
+    fsi_split = build_problem(RigidBodyState{2,Float64}(state0.X, state0.V))
+    out_split = step_fsi!(fsi_split; t=0.0, dt=dt, fluid_scheme=:CN, ode_scheme=:symplectic_euler)
+
+    fsi_strong = build_problem(RigidBodyState{2,Float64}(state0.X, state0.V))
+    out_strong = step_fsi_strong!(
+        fsi_strong;
+        t=0.0,
+        dt=dt,
+        fluid_scheme=:CN,
+        ode_scheme=:symplectic_euler,
+        maxiter=8,
+        atol=1e-9,
+        rtol=1e-7,
+        relaxation=:aitken,
+        omega_relax=0.8,
+    )
+
+    @test out_strong.converged
+    @test out_strong.iterations <= 8
+    @test norm(out_split.X - out_strong.X) < 2e-2
+    @test norm(out_split.V - out_strong.V) < 2e-2
 end
