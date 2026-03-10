@@ -13,7 +13,7 @@
 | Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
 | Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
 | Models | Unsteady monophasic moving-boundary Stokes | Implemented | `MovingStokesModelMono` + `assemble_unsteady_moving!` |
-| Models | Rigid-body FSI (translation + 2D rotation, v0) | Implemented | `StokesFSIProblem`/`StokesFSIProblem2D` with `step_fsi!` / `step_fsi_rotation!` |
+| Models | Rigid-body FSI (2D/3D split + strong coupling) | Implemented | Generic `StokesFSIProblem` + `step_fsi!` / `step_fsi_strong!` |
 | Models | Steady two-phase fixed-interface Stokes | Implemented | `StokesModelTwoPhase` with shared `u_γ` and traction rows |
 | Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
 | BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
@@ -81,19 +81,22 @@ Key verification scripts:
 - `examples/18_fsi_prescribed_rotating_cylinder.jl`: prescribed oscillatory cylinder rotation with force/torque history.
 - `examples/19_fsi_spin_decay_calibrated.jl`: calibrated rotational-drag spin decay compared against exponential ODE prediction.
 - `examples/20_fsi_falling_rotating_ellipse.jl`: translation + rotation FSI demo for a falling ellipse.
-- `examples/21_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy translational decay benchmark using calibrated drag.
+- `examples/21_3d_rigid_sphere_drag.jl`: 3D imposed-velocity rigid-sphere drag benchmark compared to `6πμRU`.
+- `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl`: 3D free-fall rigid sphere, split vs strong coupling, compared against linear-drag ODE trend.
+- `examples/23_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy translational decay benchmark using calibrated drag.
 
 ## FSI (v0)
 
 `PenguinStokes.jl` now includes rigid-body FSI wrappers for one moving embedded body:
 
-- `StokesFSIProblem`: translation-only rigid-body state (`X`, `V`).
-- `StokesFSIProblem2D`: translation + scalar rotation state (`X`, `V`, `theta`, `omega`).
-- `step_fsi!` and `step_fsi_rotation!` perform one coupled slab step: predict motion, solve unsteady moving Stokes, integrate force/torque, update rigid-body ODE.
-- `simulate_fsi!` and `simulate_fsi_rotation!` run repeated coupled steps and return history diagnostics.
+- `StokesFSIProblem`: generic wrapper for 2D/3D rigid-body states and parameters.
+- Rigid boundary velocity is unified as `uΓ = V + Ω × (x-X)` (2D scalar-spin specialization included).
+- `step_fsi!`: one-pass split coupling.
+- `step_fsi_strong!`: fixed-point strong coupling with optional Aitken relaxation.
+- `simulate_fsi!` runs repeated split steps and returns history diagnostics.
 
 Current scope/limits:
 
 - single rigid body,
-- rotation currently implemented in 2D scalar form (future 3D orientation support planned),
+- 3D translational free fall is supported; 3D rotational dynamics currently target isotropic inertia use-cases,
 - no contact/collision model (stop before wall contact in free-fall runs).

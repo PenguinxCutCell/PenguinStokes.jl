@@ -7,10 +7,11 @@ Primary exported symbols
 - `assemble_steady!`, `assemble_unsteady!`, `solve_steady!`, `solve_unsteady!`
 - `assemble_unsteady_moving!`, `solve_unsteady_moving!`
 - `embedded_boundary_quantities`, `embedded_boundary_traction`, `embedded_boundary_stress`, `integrated_embedded_force`
-- `RigidBodyState`, `RigidBodyParams`, `RigidBodyState2D`, `RigidBodyParams2D`
-- `Circle`, `Sphere`, `Ellipse`, `StokesFSIProblem`, `StokesFSIProblem2D`
-- `endtime_static_model`, `step_fsi!`, `simulate_fsi!`, `step_fsi_rotation!`, `simulate_fsi_rotation!`
-- `rigid_velocity_2d`, `rigid_velocity`, `rigid_cut_bc_tuple_2d`, `rigid_body_levelset`
+- `RigidBodyState`, `RigidBodyParams`, `RigidBodyState2D`, `RigidBodyState3D`
+- `RigidBodyParams2D`, `RigidBodyParams3D`
+- `Circle`, `Sphere`, `Ellipse`, `Ellipsoid`, `StokesFSIProblem`
+- `endtime_static_model`, `step_fsi!`, `step_fsi_rotation!`, `step_fsi_strong!`, `simulate_fsi!`, `simulate_fsi_rotation!`
+- `rigid_boundary_velocity`, `rigid_velocity_2d`, `rigid_velocity`, `rigid_cut_bc_tuple`, `rigid_cut_bc_tuple_2d`, `rigid_body_levelset`
 
 Typical construction
 
@@ -44,21 +45,24 @@ Notes
 PenguinStokes.Circle
 PenguinStokes.Sphere
 PenguinStokes.Ellipse
+PenguinStokes.Ellipsoid
+PenguinStokes.Orientation2D
+PenguinStokes.Orientation3D
 PenguinStokes.volume
 PenguinStokes.sdf
 PenguinStokes.body_inertia
 PenguinStokes.RigidBodyState
 PenguinStokes.RigidBodyParams
 PenguinStokes.RigidBodyState2D
+PenguinStokes.RigidBodyState3D
 PenguinStokes.RigidBodyParams2D
+PenguinStokes.RigidBodyParams3D
 PenguinStokes.external_force
 PenguinStokes.external_torque
 PenguinStokes.StokesFSIProblem
 PenguinStokes.step_fsi!
+PenguinStokes.step_fsi_strong!
 PenguinStokes.simulate_fsi!
-PenguinStokes.StokesFSIProblem2D
-PenguinStokes.step_fsi_rotation!
-PenguinStokes.simulate_fsi_rotation!
 PenguinStokes.endtime_static_model
 PenguinStokes.embedded_boundary_quantities
 PenguinStokes.embedded_boundary_traction
