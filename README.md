@@ -13,7 +13,7 @@
 | Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
 | Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
 | Models | Unsteady monophasic moving-boundary Stokes | Implemented | `MovingStokesModelMono` + `assemble_unsteady_moving!` |
-| Models | Rigid-body FSI (translation-only, v0) | Implemented | `StokesFSIProblem` + `step_fsi!` / `simulate_fsi!` |
+| Models | Rigid-body FSI (translation + 2D rotation, v0) | Implemented | `StokesFSIProblem`/`StokesFSIProblem2D` with `step_fsi!` / `step_fsi_rotation!` |
 | Models | Steady two-phase fixed-interface Stokes | Implemented | `StokesModelTwoPhase` with shared `u_γ` and traction rows |
 | Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
 | BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
@@ -78,19 +78,22 @@ Key verification scripts:
 - `examples/13_unsteady_moving_body_translation.jl`: one-phase prescribed moving embedded boundary with oscillatory rigid translation and trace-row checks.
 - `examples/14_unsteady_oscillating_cylinder.jl`: one-phase oscillating embedded cylinder with force/torque history output.
 - `examples/17_fsi_free_falling_circle.jl`: translation-only rigid-body FSI free-fall demo (ODE-coupled moving-boundary Stokes).
-- `examples/18_fsi_drag_calibration_circle.jl`: periodic-box drag calibration for a moving circle (`F(U)`, `F(2U)`, `F(-U)` and `ζ_num`).
-- `examples/19_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy exponential velocity decay check against calibrated-drag ODE.
+- `examples/18_fsi_prescribed_rotating_cylinder.jl`: prescribed oscillatory cylinder rotation with force/torque history.
+- `examples/19_fsi_spin_decay_calibrated.jl`: calibrated rotational-drag spin decay compared against exponential ODE prediction.
+- `examples/20_fsi_falling_rotating_ellipse.jl`: translation + rotation FSI demo for a falling ellipse.
+- `examples/21_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy translational decay benchmark using calibrated drag.
 
 ## FSI (v0)
 
-`PenguinStokes.jl` now includes a translation-only rigid-body FSI wrapper for one moving embedded body:
+`PenguinStokes.jl` now includes rigid-body FSI wrappers for one moving embedded body:
 
-- `StokesFSIProblem` stores the moving Stokes model, rigid-body state, and ODE parameters.
-- `step_fsi!` performs one coupled slab step: predict motion, solve unsteady moving Stokes, integrate force/torque, update rigid-body ODE.
-- `simulate_fsi!` runs repeated coupled steps and returns history diagnostics.
+- `StokesFSIProblem`: translation-only rigid-body state (`X`, `V`).
+- `StokesFSIProblem2D`: translation + scalar rotation state (`X`, `V`, `theta`, `omega`).
+- `step_fsi!` and `step_fsi_rotation!` perform one coupled slab step: predict motion, solve unsteady moving Stokes, integrate force/torque, update rigid-body ODE.
+- `simulate_fsi!` and `simulate_fsi_rotation!` run repeated coupled steps and return history diagnostics.
 
 Current scope/limits:
 
 - single rigid body,
-- translation-only (no rotation yet),
+- rotation currently implemented in 2D scalar form (future 3D orientation support planned),
 - no contact/collision model (stop before wall contact in free-fall runs).
