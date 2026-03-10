@@ -13,6 +13,7 @@
 | Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
 | Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
 | Models | Unsteady monophasic moving-boundary Stokes | Implemented | `MovingStokesModelMono` + `assemble_unsteady_moving!` |
+| Models | Rigid-body FSI (translation-only, v0) | Implemented | `StokesFSIProblem` + `step_fsi!` / `simulate_fsi!` |
 | Models | Steady two-phase fixed-interface Stokes | Implemented | `StokesModelTwoPhase` with shared `u_γ` and traction rows |
 | Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
 | BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
@@ -76,3 +77,18 @@ Key verification scripts:
 - `examples/12_two_phase_viscous_drop_drag.jl`: 3D fixed spherical drop run with numerical drag compared against Hadamard–Rybczynski drag scaling.
 - `examples/13_unsteady_moving_body_translation.jl`: one-phase prescribed moving embedded boundary with oscillatory rigid translation and trace-row checks.
 - `examples/14_unsteady_oscillating_cylinder.jl`: one-phase oscillating embedded cylinder with force/torque history output.
+- `examples/17_fsi_free_falling_circle.jl`: translation-only rigid-body FSI free-fall demo (ODE-coupled moving-boundary Stokes).
+
+## FSI (v0)
+
+`PenguinStokes.jl` now includes a translation-only rigid-body FSI wrapper for one moving embedded body:
+
+- `StokesFSIProblem` stores the moving Stokes model, rigid-body state, and ODE parameters.
+- `step_fsi!` performs one coupled slab step: predict motion, solve unsteady moving Stokes, integrate force/torque, update rigid-body ODE.
+- `simulate_fsi!` runs repeated coupled steps and returns history diagnostics.
+
+Current scope/limits:
+
+- single rigid body,
+- translation-only (no rotation yet),
+- no contact/collision model (stop before wall contact in free-fall runs).

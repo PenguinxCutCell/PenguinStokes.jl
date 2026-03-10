@@ -7,6 +7,8 @@ Primary exported symbols
 - `assemble_steady!`, `assemble_unsteady!`, `solve_steady!`, `solve_unsteady!`
 - `assemble_unsteady_moving!`, `solve_unsteady_moving!`
 - `embedded_boundary_quantities`, `embedded_boundary_traction`, `embedded_boundary_stress`, `integrated_embedded_force`
+- `RigidBodyState`, `RigidBodyParams`, `Circle`, `Sphere`, `StokesFSIProblem`
+- `endtime_static_model`, `step_fsi!`, `simulate_fsi!`
 
 Typical construction
 
@@ -14,6 +16,7 @@ Typical construction
 - Build `StokesModelMono(grid, body, mu, rho; bc_u=..., bc_cut=..., force=..., gauge=...)`.
 - For prescribed moving cut boundaries, build `MovingStokesModelMono(grid, body, mu, rho; bc_u=..., bc_cut_u=..., force=..., gauge=...)`.
 - For fixed-interface two-phase runs, build `StokesModelTwoPhase(grid, body, mu1, mu2; rho1=..., rho2=..., force1=..., force2=..., interface_force=..., bc_u=..., gauge=...)`.
+- For rigid-body translation FSI, wrap a moving model with `StokesFSIProblem(...)` and step with `step_fsi!(...)`.
 - Solve with `solve_steady!(model)`, `solve_unsteady!(model, x_prev; t=..., dt=..., scheme=...)`, or `solve_unsteady_moving!(model, x_prev; t=..., dt=..., scheme=...)`.
 
 Notes

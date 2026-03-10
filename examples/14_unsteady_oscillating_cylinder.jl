@@ -1,6 +1,5 @@
 using LinearAlgebra
 using CartesianGrids
-using CartesianOperators
 using PenguinBCs
 using PenguinStokes
 
@@ -8,29 +7,6 @@ function box_noslip_2d()
     return BorderConditions(
         ; left=Dirichlet(0.0), right=Dirichlet(0.0),
         bottom=Dirichlet(0.0), top=Dirichlet(0.0),
-    )
-end
-
-function endtime_static_model(model::MovingStokesModelMono{2,T}) where {T}
-    cap_p = something(model.cap_p_end)
-    op_p = something(model.op_p_end)
-    cap_u = something(model.cap_u_end)
-    op_u = ntuple(d -> DiffusionOps(cap_u[d]; periodic=model.periodic), 2)
-    return StokesModelMono(
-        cap_p,
-        op_p,
-        cap_u,
-        op_u,
-        model.mu,
-        model.rho;
-        force=model.force,
-        bc_u=model.bc_u,
-        bc_p=model.bc_p,
-        bc_cut=Dirichlet(zero(T)),
-        gauge=model.gauge,
-        strong_wall_bc=model.strong_wall_bc,
-        geom_method=:prebuilt,
-        body=model.body,
     )
 end
 

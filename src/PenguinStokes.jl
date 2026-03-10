@@ -17,6 +17,8 @@ export MovingStokesModelMono
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
 export assemble_unsteady_moving!, solve_unsteady_moving!
 export embedded_boundary_quantities, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
+export RigidBodyState, RigidBodyParams, Circle, Sphere, StokesFSIProblem
+export endtime_static_model, step_fsi!, simulate_fsi!
 
 abstract type AbstractPressureGauge end
 
@@ -3401,5 +3403,7 @@ function StokesModelTwoPhase(
         check_interface=check_interface,
     )
 end
+
+include("fsi.jl")
 
 end

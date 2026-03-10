@@ -84,3 +84,14 @@ Moving embedded boundary (prescribed velocity)
 - `MovingStokesModelMono` supports one-phase unsteady Stokes with time-dependent level-set geometry `body(x..., t)` (or static `body(x...)`) and prescribed interface motion through `bc_cut_u`.
 - `assemble_unsteady_moving!` builds slab-integrated operators between `t_n` and `t_{n+1}` using `SpaceTimeCartesianGrid` reduction, then enforces cut-trace rows strongly at `t_{n+1}`.
 - Outer wall BC (`bc_u`, optional `bc_p`) and pressure gauge are applied on end-time capacities, and row-activity masking is computed from end-time active cells/interface support.
+
+Rigid-body FSI wrapper (v0)
+
+- `StokesFSIProblem` adds a translation-only rigid-body ODE loop around `MovingStokesModelMono`.
+- `step_fsi!` performs one coupled step:
+  - predicts rigid translation over the slab,
+  - solves `solve_unsteady_moving!`,
+  - evaluates end-time force/torque with `integrated_embedded_force(endtime_static_model(...), ...)`,
+  - advances rigid-body state with a first-order ODE scheme (`:symplectic_euler` or `:forward_euler`).
+- `simulate_fsi!` runs repeated coupled steps and records diagnostics.
+- Current scope: single rigid body, translation only, no contact/collision handling.
