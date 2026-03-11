@@ -2711,8 +2711,10 @@ function assemble_unsteady_moving!(
         Ψp = spdiagm(0 => T[psip(Vun[d][i], Vun1[d][i]) for i in 1:nt])
         Ψm = spdiagm(0 => T[psim(Vun[d][i], Vun1[d][i]) for i in 1:nt])
 
-        A_oo = M1 + theta * (K * Ψp)
-        A_og = -(M1 - M0) + theta * (C * Ψp)
+        # Ψp/Ψm already encode the selected temporal scheme for moving-slab terms.
+        # Do not apply θ a second time to K/C contributions.
+        A_oo = M1 + (K * Ψp)
+        A_og = -(M1 - M0) + (C * Ψp)
         _insert_block!(A, layout.uomega[d], layout.uomega[d], A_oo)
         _insert_block!(A, layout.uomega[d], layout.ugamma[d], A_og)
         _insert_block!(A, layout.uomega[d], layout.pomega, grad[d])
@@ -2722,8 +2724,8 @@ function assemble_unsteady_moving!(
 
         uω_prev = Vector{T}(xfull_prev[layout.uomega[d]])
         uγ_prev = Vector{T}(xfull_prev[layout.ugamma[d]])
-        rhs = (M0 - (one(T) - theta) * (K * Ψm)) * uω_prev
-        rhs .-= (one(T) - theta) .* ((C * Ψm) * uγ_prev)
+        rhs = (M0 - (K * Ψm)) * uω_prev
+        rhs .-= (C * Ψm) * uγ_prev
 
         f_prev = _force_values(model, cap_u_end[d], d, t)
         f_next = _force_values(model, cap_u_end[d], d, t_next)

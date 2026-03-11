@@ -23,6 +23,8 @@ julia --project=. examples/20_fsi_falling_rotating_ellipse.jl
 julia --project=. examples/21_3d_rigid_sphere_drag.jl
 julia --project=. examples/22_3d_falling_rigid_sphere_split_vs_strong.jl
 julia --project=. examples/23_fsi_neutral_buoyancy_decay.jl
+julia --project=. examples/24_mms_convergence_suite.jl
+julia --project=. examples/25_moving_mms_time_schemes.jl
 ```
 
 General test command:

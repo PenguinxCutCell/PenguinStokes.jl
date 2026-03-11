@@ -84,6 +84,8 @@ Key verification scripts:
 - `examples/21_3d_rigid_sphere_drag.jl`: 3D imposed-velocity rigid-sphere drag benchmark compared to `6πμRU`.
 - `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl`: 3D free-fall rigid sphere, split vs strong coupling, compared against linear-drag ODE trend.
 - `examples/23_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy translational decay benchmark using calibrated drag.
+- `examples/24_mms_convergence_suite.jl`: consolidated steady MMS convergence script (mono no-body, mono embedded, two-phase fixed-interface nontrivial profile with nonzero interface traction forcing).
+- `examples/25_moving_mms_time_schemes.jl`: moving monophasic MMS with embedded moving body + no-body baseline, including BE/CN/θ temporal-order reports.
 
 ## FSI (v0)
 
