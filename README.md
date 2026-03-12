@@ -71,6 +71,7 @@ Key verification scripts:
 - `examples/05_mms_convergence_zero_pressure.jl`: no-body zero-pressure MMS, near second-order velocity convergence.
 - `examples/06_mms_convergence_embedded_outside_circle.jl`: embedded-interface MMS for outside-circle fluid (`ϕ = R - sqrt((x-xc)^2 + (y-yc)^2)`), with no-slip on box and cut interface.
 - `examples/08_two_phase_mms_fixed_interface.jl`: two-phase fixed-interface equilibrium with viscosity ratio and prescribed interface traction.
+- `examples/two_phase_static_circle_spurious_current.jl`: static circular two-phase interface benchmark for spurious-current detection and Laplace jump accuracy (`Δp = σ/R`) under no-slip walls.
 - `examples/09_two_phase_planar_couette.jl`: two-layer planar Couette validation (periodic streamwise, fixed flat interface) with exact piecewise-linear profile.
 - `examples/10_two_phase_planar_poiseuille.jl`: two-layer planar Poiseuille validation (body-force equivalent, periodic streamwise) with exact piecewise-parabolic profile.
 - `examples/11_two_phase_oscillatory_couette.jl`: unsteady oscillatory two-layer Couette validation with harmonic amplitude/phase probe checks.
