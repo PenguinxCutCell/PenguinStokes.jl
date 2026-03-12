@@ -362,6 +362,11 @@ function step_fsi!(
     return merge((sys=sys, force=q, t=tnext), ode)
 end
 
+"""
+    step_fsi_rotation!(fsi; kwargs...)
+
+2D rotation-focused alias of `step_fsi!` for `RigidBodyState2D`.
+"""
 function step_fsi_rotation!(
     fsi::StokesFSIProblem{2,T,MT,<:RigidBodyState2D,PT};
     kwargs...
@@ -410,6 +415,11 @@ function simulate_fsi!(
     return history
 end
 
+"""
+    simulate_fsi_rotation!(fsi; kwargs...)
+
+2D rotation-focused alias of `simulate_fsi!` for `RigidBodyState2D`.
+"""
 function simulate_fsi_rotation!(
     fsi::StokesFSIProblem{2,T,MT,<:RigidBodyState2D,PT};
     kwargs...

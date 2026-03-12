@@ -1,47 +1,111 @@
-**API and types**
+# API Reference
 
-Primary exported symbols
+This page documents the primary exported API and practical constructor notes.
 
-- `AbstractPressureGauge`, `PinPressureGauge`, `MeanPressureGauge`
-- `StokesLayout`, `StokesModelMono`, `MovingStokesModelMono`, `StokesLayoutTwoPhase`, `StokesModelTwoPhase`, `staggered_velocity_grids`
-- `assemble_steady!`, `assemble_unsteady!`, `solve_steady!`, `solve_unsteady!`
-- `assemble_unsteady_moving!`, `solve_unsteady_moving!`
-- `embedded_boundary_quantities`, `embedded_boundary_traction`, `embedded_boundary_stress`, `integrated_embedded_force`
-- `RigidBodyState`, `RigidBodyParams`, `RigidBodyState2D`, `RigidBodyState3D`
-- `RigidBodyParams2D`, `RigidBodyParams3D`
-- `Circle`, `Sphere`, `Ellipse`, `Ellipsoid`, `StokesFSIProblem`
-- `endtime_static_model`, `step_fsi!`, `step_fsi_rotation!`, `step_fsi_strong!`, `simulate_fsi!`, `simulate_fsi_rotation!`
-- `rigid_boundary_velocity`, `rigid_velocity_2d`, `rigid_velocity`, `rigid_cut_bc_tuple`, `rigid_cut_bc_tuple_2d`, `rigid_body_levelset`
+## 1. Pressure Gauges
 
-Typical construction
+- `PinPressureGauge(; index=nothing)`: pin one pressure DOF.
+- `MeanPressureGauge()`: enforce active-volume weighted zero mean pressure.
 
-- Create a pressure grid `CartesianGrid`.
-- Build `StokesModelMono(grid, body, mu, rho; bc_u=..., bc_cut=..., force=..., gauge=...)`.
-- For prescribed moving cut boundaries, build `MovingStokesModelMono(grid, body, mu, rho; bc_u=..., bc_cut_u=..., force=..., gauge=...)`.
-- For fixed-interface two-phase runs, build `StokesModelTwoPhase(grid, body, mu1, mu2; rho1=..., rho2=..., force1=..., force2=..., interface_force=..., bc_u=..., gauge=...)`.
-- For rigid-body translation FSI, wrap a moving model with `StokesFSIProblem(...)` and step with `step_fsi!(...)`.
-- Solve with `solve_steady!(model)`, `solve_unsteady!(model, x_prev; t=..., dt=..., scheme=...)`, or `solve_unsteady_moving!(model, x_prev; t=..., dt=..., scheme=...)`.
+Gauge is required for all model families.
 
-Notes
+## 2. Layout Types
 
-- Velocity boundary conditions are passed component-wise through `bc_u`.
-- Outer-box Stokes traction laws are available through `PenguinBCs` side entries in `bc_u`:
-- `PressureOutlet(pout)`, `DoNothing()`, and `Traction(t)`.
-- Outer-box Stokes symmetry/free-slip walls are available through `Symmetry()`.
-- Traction-type BCs must be set on all velocity components for a given side.
-- Symmetry must also be set on all velocity components for a given side.
-- `bc_p` cannot be imposed on traction or symmetry sides.
-- Pressure gauge remains required; optional wall constraints can be passed through `bc_p`.
-- `PinPressureGauge(index=...)` pins that same pressure DOF row/column.
-- `MeanPressureGauge()` uses active-cell-volume weights for the zero-mean constraint.
-- Cut/interface BC currently supports Dirichlet values for `ugamma`.
-- `MovingStokesModelMono` uses per-component cut Dirichlet data through `bc_cut_u`.
-- `StokesModelTwoPhase` reuses `ugamma` rows as traction-balance equations (no separate `bc_cut`).
-- Embedded-boundary utilities return pressure-grid cut-cell stress/traction fields and integrated force splits (pressure/viscous).
+- `StokesLayout{N}` for monophasic/moving mono systems.
+- `StokesLayoutTwoPhase{N}` for fixed-interface two-phase systems.
 
-**Canonical docstrings**
+## 3. Model Constructors
+
+### `StokesModelMono`
+
+Required:
+
+- `gridp`, `body`, `mu`, `rho`
+
+Key keywords:
+
+- `bc_u`, `bc_p`, `bc_cut`, `force`, `gauge`, `strong_wall_bc`, `geom_method`
+
+### `MovingStokesModelMono`
+
+Required:
+
+- `gridp`, `body`, `mu`, `rho`
+
+Key keywords:
+
+- `bc_u`, `bc_p`, `bc_cut_u`, `force`, `gauge`, `strong_wall_bc`, `geom_method`
+
+### `StokesModelTwoPhase`
+
+Required:
+
+- `gridp`, `body`, `mu1`, `mu2`
+
+Key keywords:
+
+- `rho1`, `rho2`, `force1`, `force2`, `interface_force`,
+  `bc_u`, `bc_p`, `gauge`, `strong_wall_bc`, `geom_method`, `check_interface`
+
+## 4. Assembly and Solve Entry Points
+
+- `assemble_steady!`, `assemble_unsteady!`
+- `assemble_unsteady_moving!`
+- `solve_steady!`, `solve_unsteady!`, `solve_unsteady_moving!`
+
+All mutate/return `LinearSystem` objects with solution in `.x` after `solve!`.
+
+## 5. Postprocessing
+
+- `embedded_boundary_quantities`
+- `embedded_boundary_traction`
+- `embedded_boundary_stress`
+- `integrated_embedded_force`
+
+Current scope: `StokesModelMono`.
+
+## 6. Rigid-Body and FSI APIs
+
+Rigid-body primitives:
+
+- states: `RigidBodyState`, `RigidBodyState2D`, `RigidBodyState3D`
+- parameters: `RigidBodyParams`, `RigidBodyParams2D`, `RigidBodyParams3D`
+- shapes: `Circle`, `Sphere`, `Ellipse`, `Ellipsoid`
+
+FSI wrappers/steppers:
+
+- `StokesFSIProblem`, `StokesFSIProblem2D`
+- `endtime_static_model`
+- `step_fsi!`, `step_fsi_rotation!`, `step_fsi_strong!`
+- `simulate_fsi!`, `simulate_fsi_rotation!`
+
+Rigid-motion helper callbacks:
+
+- `rigid_boundary_velocity`, `rigid_velocity_2d`, `rigid_velocity`
+- `rigid_body_levelset`, `rigid_cut_bc_tuple`, `rigid_cut_bc_tuple_2d`
+
+## 7. Canonical Docstrings
 
 ```@docs
+PenguinStokes.AbstractPressureGauge
+PenguinStokes.PinPressureGauge
+PenguinStokes.MeanPressureGauge
+PenguinStokes.StokesLayout
+PenguinStokes.StokesLayoutTwoPhase
+PenguinStokes.StokesModelMono
+PenguinStokes.MovingStokesModelMono
+PenguinStokes.StokesModelTwoPhase
+PenguinStokes.staggered_velocity_grids
+PenguinStokes.assemble_steady!
+PenguinStokes.assemble_unsteady!
+PenguinStokes.assemble_unsteady_moving!
+PenguinStokes.solve_steady!
+PenguinStokes.solve_unsteady!
+PenguinStokes.solve_unsteady_moving!
+PenguinStokes.embedded_boundary_quantities
+PenguinStokes.embedded_boundary_traction
+PenguinStokes.embedded_boundary_stress
+PenguinStokes.integrated_embedded_force
 PenguinStokes.Circle
 PenguinStokes.Sphere
 PenguinStokes.Ellipse
@@ -52,20 +116,24 @@ PenguinStokes.volume
 PenguinStokes.sdf
 PenguinStokes.body_inertia
 PenguinStokes.RigidBodyState
-PenguinStokes.RigidBodyParams
 PenguinStokes.RigidBodyState2D
 PenguinStokes.RigidBodyState3D
+PenguinStokes.RigidBodyParams
 PenguinStokes.RigidBodyParams2D
 PenguinStokes.RigidBodyParams3D
 PenguinStokes.external_force
 PenguinStokes.external_torque
+PenguinStokes.rigid_boundary_velocity
+PenguinStokes.rigid_velocity_2d
+PenguinStokes.rigid_velocity
+PenguinStokes.rigid_body_levelset
+PenguinStokes.rigid_cut_bc_tuple
+PenguinStokes.rigid_cut_bc_tuple_2d
 PenguinStokes.StokesFSIProblem
+PenguinStokes.endtime_static_model
 PenguinStokes.step_fsi!
+PenguinStokes.step_fsi_rotation!
 PenguinStokes.step_fsi_strong!
 PenguinStokes.simulate_fsi!
-PenguinStokes.endtime_static_model
-PenguinStokes.embedded_boundary_quantities
-PenguinStokes.embedded_boundary_traction
-PenguinStokes.embedded_boundary_stress
-PenguinStokes.integrated_embedded_force
+PenguinStokes.simulate_fsi_rotation!
 ```

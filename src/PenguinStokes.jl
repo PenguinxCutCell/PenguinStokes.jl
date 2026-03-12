@@ -25,15 +25,39 @@ export rigid_cut_bc_tuple, rigid_cut_bc_tuple_2d, rigid_body_levelset
 export StokesFSIProblem, StokesFSIProblem2D
 export endtime_static_model, step_fsi!, simulate_fsi!, step_fsi_rotation!, simulate_fsi_rotation!, step_fsi_strong!
 
+"""
+    AbstractPressureGauge
+
+Abstract supertype for pressure nullspace constraints in Stokes systems.
+Concrete options are `PinPressureGauge` and `MeanPressureGauge`.
+"""
 abstract type AbstractPressureGauge end
 
+"""
+    PinPressureGauge(; index=nothing)
+
+Pressure gauge that replaces one pressure equation by a pointwise pinning
+constraint `p[index] = 0` (or the first active pressure DOF when `index=nothing`).
+"""
 struct PinPressureGauge <: AbstractPressureGauge
     index::Union{Nothing,Int}
 end
 PinPressureGauge(; index::Union{Nothing,Int}=nothing) = PinPressureGauge(index)
 
+"""
+    MeanPressureGauge()
+
+Pressure gauge that replaces one pressure equation by a zero-mean pressure
+constraint over active pressure cells.
+"""
 struct MeanPressureGauge <: AbstractPressureGauge end
 
+"""
+    StokesLayout{N}
+
+Unknown ordering for monophasic Stokes:
+`[uomega_1; ugamma_1; ...; uomega_N; ugamma_N; pomega]`.
+"""
 struct StokesLayout{N}
     nt::Int
     uomega::NTuple{N,UnitRange{Int}}
@@ -41,6 +65,12 @@ struct StokesLayout{N}
     pomega::UnitRange{Int}
 end
 
+"""
+    StokesLayoutTwoPhase{N}
+
+Unknown ordering for fixed-interface two-phase Stokes:
+`[uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma_1; ...; ugamma_N; pomega1; pomega2]`.
+"""
 struct StokesLayoutTwoPhase{N}
     nt::Int
     uomega1::NTuple{N,UnitRange{Int}}
@@ -94,6 +124,15 @@ function StokesLayoutTwoPhase(nt::Int, ::Val{N}) where {N}
     return StokesLayoutTwoPhase{N}(nt, uomega1, uomega2, ugamma, pomega1, pomega2)
 end
 
+"""
+    StokesModelMono{N,T}
+
+Monophasic cut-cell Stokes model on a staggered MAC grid.
+
+Use constructors
+`StokesModelMono(gridp, body, mu, rho; ...)` or
+`StokesModelMono(cap_p, op_p, cap_u, op_u, mu, rho; ...)`.
+"""
 mutable struct StokesModelMono{N,T,FT,BT}
     gridp::CartesianGrid{N,T}
     gridu::NTuple{N,CartesianGrid{N,T}}
@@ -115,6 +154,16 @@ mutable struct StokesModelMono{N,T,FT,BT}
     body::BT
 end
 
+"""
+    StokesModelTwoPhase{N,T}
+
+Fixed-interface two-phase Stokes model with shared interface velocity trace
+`ugamma` and one pressure block per phase.
+
+Use constructors
+`StokesModelTwoPhase(gridp, body, mu1, mu2; ...)` or
+`StokesModelTwoPhase(cap_p1, op_p1, ..., cap_p2, op_p2, ...; ...)`.
+"""
 mutable struct StokesModelTwoPhase{N,T,FT1,FT2,IFT,BT}
     gridp::CartesianGrid{N,T}
     gridu::NTuple{N,CartesianGrid{N,T}}
@@ -146,6 +195,12 @@ mutable struct StokesModelTwoPhase{N,T,FT1,FT2,IFT,BT}
     layout::StokesLayoutTwoPhase{N}
 end
 
+"""
+    MovingStokesModelMono{N,T}
+
+Unsteady monophasic moving-boundary Stokes model with prescribed embedded
+boundary velocity through `bc_cut_u`.
+"""
 mutable struct MovingStokesModelMono{N,T,FT,BT}
     gridp::CartesianGrid{N,T}
     gridu::NTuple{N,CartesianGrid{N,T}}
@@ -334,6 +389,12 @@ function _periodic_velocity_flags(bc_u::NTuple{N,BorderConditions}) where {N}
     return flags
 end
 
+"""
+    staggered_velocity_grids(gridp)
+
+Build component-wise staggered velocity grids from a pressure grid `gridp`
+by half-cell shifting each component grid along its own axis.
+"""
 function staggered_velocity_grids(gridp::CartesianGrid{N,T}) where {N,T}
     h = meshsize(gridp)
     return ntuple(d -> begin
@@ -2420,6 +2481,14 @@ function _assemble_core!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesM
     return A, b
 end
 
+"""
+    assemble_steady!(sys, model, t=0)
+
+Assemble steady Stokes linear system into `sys` for `StokesModelMono` or
+`StokesModelTwoPhase` at time `t`.
+
+Mutates `sys.A` and `sys.b` in place.
+"""
 function assemble_steady!(sys::LinearSystem{T}, model::StokesModelTwoPhase{N,T}, t::T=zero(T)) where {N,T}
     blocks = _stokes_blocks(model)
     nsys = nunknowns(model.layout)
@@ -2443,6 +2512,14 @@ function assemble_steady!(sys::LinearSystem{T}, model::StokesModelTwoPhase{N,T},
     return sys
 end
 
+"""
+    assemble_unsteady!(sys, model, x_prev, t, dt; scheme=:BE)
+
+Assemble one unsteady theta-step system for `StokesModelMono` or
+`StokesModelTwoPhase`.
+
+`scheme` supports `:BE`, `:CN`, or numeric `theta ∈ [0,1]`.
+"""
 function assemble_unsteady!(
     sys::LinearSystem{T},
     model::StokesModelTwoPhase{N,T},
@@ -2623,6 +2700,13 @@ function assemble_unsteady!(
     return sys
 end
 
+"""
+    assemble_unsteady_moving!(sys, model, x_prev, t, dt; scheme=:CN)
+
+Assemble one unsteady moving-boundary theta-step system for
+`MovingStokesModelMono`, using slab geometry over `[t, t+dt]` and end-time box
+BC/gauge application.
+"""
 function assemble_unsteady_moving!(
     sys::LinearSystem{T},
     model::MovingStokesModelMono{N,T},
@@ -2757,6 +2841,12 @@ function assemble_unsteady_moving!(
     return sys
 end
 
+"""
+    solve_steady!(model; t=0, method=:direct, kwargs...)
+
+Assemble and solve a steady Stokes system for `StokesModelMono` or
+`StokesModelTwoPhase`. Returns a `LinearSystem` with solution in `sys.x`.
+"""
 function solve_steady!(
     model::StokesModelMono{N,T};
     t::T=zero(T),
@@ -2783,6 +2873,12 @@ function solve_steady!(
     return sys
 end
 
+"""
+    solve_unsteady!(model, x_prev; t=0, dt, scheme=:BE, method=:direct, kwargs...)
+
+Assemble and solve one unsteady theta-step for `StokesModelMono` or
+`StokesModelTwoPhase`.
+"""
 function solve_unsteady!(
     model::StokesModelMono{N,T},
     x_prev::AbstractVector;
@@ -2815,6 +2911,12 @@ function solve_unsteady!(
     return sys
 end
 
+"""
+    solve_unsteady_moving!(model, x_prev; t=0, dt, scheme=:CN, method=:direct, kwargs...)
+
+Assemble and solve one unsteady moving-boundary theta-step for
+`MovingStokesModelMono`.
+"""
 function solve_unsteady_moving!(
     model::MovingStokesModelMono{N,T},
     x_prev::AbstractVector;
@@ -3074,6 +3176,20 @@ function integrated_embedded_force(model::StokesModelMono{N,T}, sys::LinearSyste
     return integrated_embedded_force(model, sys.x; kwargs...)
 end
 
+"""
+    StokesModelMono(gridp, body, mu, rho; kwargs...)
+    StokesModelMono(cap_p, op_p, cap_u, op_u, mu, rho; kwargs...)
+
+Construct a monophasic Stokes model.
+
+Key keywords:
+- `force`: body force (constant tuple/scalar or callback)
+- `bc_u`: per-component outer velocity BCs
+- `bc_p`: optional pressure BCs on box walls
+- `bc_cut`: cut-boundary velocity BC (currently `Dirichlet` only)
+- `gauge`: pressure gauge (`PinPressureGauge` or `MeanPressureGauge`)
+- `strong_wall_bc`: enable strong elimination for collocated Dirichlet wall rows
+"""
 function StokesModelMono(
     cap_p::AssembledCapacity{N,T},
     op_p::DiffusionOps{N,T},
@@ -3190,6 +3306,14 @@ function StokesModelMono(
     )
 end
 
+"""
+    MovingStokesModelMono(gridp, body, mu, rho; kwargs...)
+
+Construct a moving-boundary monophasic Stokes model.
+
+`body(x..., t)` defines moving geometry and `bc_cut_u` prescribes per-component
+embedded-boundary velocity at `t_{n+1}` in `assemble_unsteady_moving!`.
+"""
 function MovingStokesModelMono(
     gridp::CartesianGrid{N,T},
     body,
@@ -3266,6 +3390,19 @@ function _check_two_phase_interface_consistency(
     return nothing
 end
 
+"""
+    StokesModelTwoPhase(gridp, body, mu1, mu2; kwargs...)
+    StokesModelTwoPhase(cap_p1, op_p1, cap_u1, op_u1, cap_p2, op_p2, cap_u2, op_u2, mu1, mu2, rho1, rho2; kwargs...)
+
+Construct a fixed-interface two-phase Stokes model with shared interface velocity
+trace unknowns and phase-wise pressure blocks.
+
+Key keywords:
+- `rho1`, `rho2`: phase densities (for unsteady terms)
+- `force1`, `force2`: phase body forces
+- `interface_force`: interface traction forcing callback/value
+- `bc_u`, `bc_p`, `gauge`, `strong_wall_bc`: box BC and gauge controls
+"""
 function StokesModelTwoPhase(
     cap_p1::AssembledCapacity{N,T},
     op_p1::DiffusionOps{N,T},

@@ -1,3 +1,6 @@
+# Developer probe script for manual MMS/outlet diagnostics.
+# This file is intentionally retained and is not included by `test/runtests.jl`.
+
 using LinearAlgebra
 using SparseArrays
 using Printf

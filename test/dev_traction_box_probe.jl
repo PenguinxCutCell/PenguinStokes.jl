@@ -1,3 +1,6 @@
+# Developer probe/regression for traction-row overwrite behavior.
+# This file is intentionally retained and included by `test/runtests.jl`.
+
 using Test
 using LinearAlgebra
 using SparseArrays

@@ -4,41 +4,100 @@
 ![CI](https://github.com/PenguinxCutCell/PenguinStokes.jl/actions/workflows/ci.yml/badge.svg)
 ![Coverage](https://codecov.io/gh/PenguinxCutCell/PenguinStokes.jl/branch/main/graph/badge.svg)
 
-`PenguinStokes.jl` assembles monophasic cut-cell Stokes systems on MAC-style staggered grids using `CartesianGeometry.jl`, `CartesianOperators.jl`, and `PenguinSolverCore.jl`.
+`PenguinStokes.jl` assembles cut-cell Stokes systems on MAC-style staggered
+Cartesian grids for monophasic, moving-boundary, fixed-interface two-phase, and
+rigid-body FSI workflows.
 
-## Feature Status
+## Documentation
 
-| Area | Item | Status | Notes |
+- Home: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/>
+- Models and equations: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/stokes/>
+- Algorithms: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/algorithms/>
+- Boundary conditions and gauges: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/boundary_conditions/>
+- FSI: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/fsi/>
+- Postprocessing: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/postprocessing/>
+- API: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/api/>
+- Examples and verification: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/examples/>
+- Feature matrix: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/feature_matrix/>
+- Developer notes: <https://PenguinxCutCell.github.io/PenguinStokes.jl/dev/developer_notes/>
+
+## Audited Feature Status
+
+Status labels: `Implemented`, `Partial`, `Missing`.
+
+| Area | Feature | Status | Notes |
 |---|---|---|---|
-| Models | Steady monophasic Stokes | Implemented | `StokesModelMono` + `assemble_steady!` |
-| Models | Unsteady monophasic Stokes | Implemented | Theta-form assembly via `assemble_unsteady!` |
-| Models | Unsteady monophasic moving-boundary Stokes | Implemented | `MovingStokesModelMono` + `assemble_unsteady_moving!` |
-| Models | Rigid-body FSI (2D/3D split + strong coupling) | Implemented | Generic `StokesFSIProblem` + `step_fsi!` / `step_fsi_strong!` |
-| Models | Steady two-phase fixed-interface Stokes | Implemented | `StokesModelTwoPhase` with shared `u_γ` and traction rows |
-| Grids | MAC staggered layout | Implemented | `staggered_velocity_grids` + per-component operators |
-| BCs (velocity box) | Dirichlet | Implemented | Applied on momentum rows |
-| BCs (velocity box) | Neumann | Implemented | Applied as flux terms |
-| BCs (velocity box) | Periodic | Implemented | Through periodic stencil/operator construction |
-| BCs (cut/interface) | Dirichlet on `u_γ` | Implemented | `bc_cut=Dirichlet(...)` |
-| BCs (cut/interface) | Neumann / Periodic | Missing | Explicitly rejected in current cut BC applier |
-| Pressure | Pin gauge | Implemented | `PinPressureGauge` |
-| Pressure | Mean gauge | Implemented | `MeanPressureGauge` |
+| Models | Steady monophasic Stokes | Implemented | `StokesModelMono`, `assemble_steady!` |
+| Models | Unsteady monophasic Stokes | Implemented | `assemble_unsteady!` (`:BE`, `:CN`, numeric `theta`) |
+| Models | Moving-boundary monophasic Stokes | Implemented | `MovingStokesModelMono`, `assemble_unsteady_moving!` |
+| Models | Fixed-interface two-phase Stokes | Implemented | `StokesModelTwoPhase` with shared `ugamma` traction rows |
+| Models | Moving-interface two-phase Stokes | Missing | no moving-interface two-phase constructor/path |
+| FSI | Split rigid-body coupling | Implemented | `step_fsi!`, `simulate_fsi!` |
+| FSI | Strong rigid-body coupling | Implemented | `step_fsi_strong!` |
+| FSI | Rotational rigid-body coupling | Partial | strong 2D coverage; narrower 3D validation |
+| FSI | Multi-body/contact | Missing | single-body scope only |
+| BCs (outer velocity) | Dirichlet / Neumann / Periodic | Implemented | component-wise BC path |
+| BCs (outer velocity) | Traction / PressureOutlet / DoNothing | Implemented | side-level Stokes traction overwrite |
+| BCs (outer velocity) | Symmetry | Implemented | side-level free-slip/symmetry overwrite |
+| BCs (cut/interface velocity) | Dirichlet on `ugamma` | Implemented | `bc_cut=Dirichlet(...)` |
+| BCs (cut/interface velocity) | Neumann / Periodic | Missing | explicitly rejected (`ArgumentError`) |
+| Pressure | Pin gauge / mean gauge | Implemented | `PinPressureGauge`, `MeanPressureGauge` |
+| Pressure | Optional side pressure BC (`bc_p`) | Implemented | with compatibility restrictions |
+| Postprocessing | Stress / traction / force / torque | Implemented | `embedded_boundary_quantities` family (mono model scope) |
 
-## Unknown ordering
+## Model Families
 
-For `N` dimensions and `nt = prod(grid.n)`:
+- `StokesModelMono`: steady and unsteady monophasic Stokes.
+- `MovingStokesModelMono`: moving embedded boundary with prescribed cut velocity.
+- `StokesModelTwoPhase`: fixed-interface two-phase Stokes.
+- `StokesFSIProblem`: rigid-body FSI wrappers (split and strong coupling).
 
-`x = [uomega_1; ugamma_1; ...; uomega_N; ugamma_N; pomega]`
+## Boundary-Condition Families
 
-Total size: `(2N+1)*nt`.
+Outer velocity BCs:
 
-Two-phase fixed-interface ordering:
+- scalar: `Dirichlet`, `Neumann`, `Periodic`
+- side-level Stokes laws: `Traction`, `PressureOutlet`, `DoNothing`, `Symmetry`
 
-`x = [uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma_1; ...; ugamma_N; pomega1; pomega2]`
+Cut/interface velocity BCs:
 
-Total size: `(3N+2)*nt`.
+- supported: Dirichlet
+- unsupported: Neumann, periodic (currently rejected)
 
-## Quick start
+Consistency rules (enforced):
+
+- traction-type BC must be set on all velocity components for a side,
+- symmetry must be set on all velocity components for a side,
+- `bc_p` cannot be imposed on traction/symmetry sides.
+
+## Gauges
+
+A pressure gauge is required:
+
+- `PinPressureGauge(; index=nothing)`
+- `MeanPressureGauge()`
+
+## Postprocessing
+
+Exported helpers for `StokesModelMono`:
+
+- `embedded_boundary_quantities`
+- `embedded_boundary_traction`
+- `embedded_boundary_stress`
+- `integrated_embedded_force`
+
+Outputs include pressure/viscous force split and torque.
+
+## FSI Scope
+
+Implemented rigid-body FSI scope:
+
+- 2D and 3D rigid states/params,
+- rotational state updates,
+- split coupling (`step_fsi!`) and strong coupling (`step_fsi_strong!`),
+- force/torque from end-time static-model postprocessing.
+
+## Quick Start
 
 ```julia
 using CartesianGrids, PenguinBCs, PenguinStokes
@@ -64,42 +123,28 @@ model = StokesModelMono(
 sys = solve_steady!(model)
 ```
 
-See `examples/` for complete scripts including MMS/convergence checks.
+## Validation Examples
 
-Key verification scripts:
-- `examples/04_mms_convergence.jl`: pressure-coupled streamfunction MMS (prints error orders and exact-state momentum residual split `interior` vs `boundary` to track order loss sources).
-- `examples/05_mms_convergence_zero_pressure.jl`: no-body zero-pressure MMS, near second-order velocity convergence.
-- `examples/06_mms_convergence_embedded_outside_circle.jl`: embedded-interface MMS for outside-circle fluid (`ϕ = R - sqrt((x-xc)^2 + (y-yc)^2)`), with no-slip on box and cut interface.
-- `examples/08_two_phase_mms_fixed_interface.jl`: two-phase fixed-interface equilibrium with viscosity ratio and prescribed interface traction.
-- `examples/two_phase_static_circle_spurious_current.jl`: static circular two-phase interface benchmark for spurious-current detection and Laplace jump accuracy (`Δp = σ/R`) under no-slip walls.
-- `examples/09_two_phase_planar_couette.jl`: two-layer planar Couette validation (periodic streamwise, fixed flat interface) with exact piecewise-linear profile.
-- `examples/10_two_phase_planar_poiseuille.jl`: two-layer planar Poiseuille validation (body-force equivalent, periodic streamwise) with exact piecewise-parabolic profile.
-- `examples/11_two_phase_oscillatory_couette.jl`: unsteady oscillatory two-layer Couette validation with harmonic amplitude/phase probe checks.
-- `examples/12_two_phase_viscous_drop_drag.jl`: 3D fixed spherical drop run with numerical drag compared against Hadamard–Rybczynski drag scaling.
-- `examples/13_unsteady_moving_body_translation.jl`: one-phase prescribed moving embedded boundary with oscillatory rigid translation and trace-row checks.
-- `examples/14_unsteady_oscillating_cylinder.jl`: one-phase oscillating embedded cylinder with force/torque history output.
-- `examples/17_fsi_free_falling_circle.jl`: translation-only rigid-body FSI free-fall demo (ODE-coupled moving-boundary Stokes).
-- `examples/18_fsi_prescribed_rotating_cylinder.jl`: prescribed oscillatory cylinder rotation with force/torque history.
-- `examples/19_fsi_spin_decay_calibrated.jl`: calibrated rotational-drag spin decay compared against exponential ODE prediction.
-- `examples/20_fsi_falling_rotating_ellipse.jl`: translation + rotation FSI demo for a falling ellipse.
-- `examples/21_3d_rigid_sphere_drag.jl`: 3D imposed-velocity rigid-sphere drag benchmark compared to `6πμRU`.
-- `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl`: 3D free-fall rigid sphere, split vs strong coupling, compared against linear-drag ODE trend.
-- `examples/23_fsi_neutral_buoyancy_decay.jl`: neutral-buoyancy translational decay benchmark using calibrated drag.
-- `examples/24_mms_convergence_suite.jl`: consolidated steady MMS convergence script (mono no-body, mono embedded, two-phase fixed-interface nontrivial profile with nonzero interface traction forcing).
-- `examples/25_moving_mms_time_schemes.jl`: moving monophasic MMS with embedded moving body + no-body baseline, including BE/CN/θ temporal-order reports.
+Representative scripts:
 
-## FSI (v0)
+- `examples/04_mms_convergence.jl` (mono MMS convergence)
+- `examples/06_mms_convergence_embedded_outside_circle.jl` (embedded-interface MMS)
+- `examples/08_two_phase_mms_fixed_interface.jl` (two-phase traction-jump equilibrium)
+- `examples/two_phase_static_circle_spurious_current.jl` (static drop spurious-current benchmark)
+- `examples/09_two_phase_planar_couette.jl`, `examples/10_two_phase_planar_poiseuille.jl`
+- `examples/13_unsteady_moving_body_translation.jl`, `examples/25_moving_mms_time_schemes.jl`
+- `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl` (FSI split vs strong)
 
-`PenguinStokes.jl` now includes rigid-body FSI wrappers for one moving embedded body:
+Developer probe scripts (retained intentionally):
 
-- `StokesFSIProblem`: generic wrapper for 2D/3D rigid-body states and parameters.
-- Rigid boundary velocity is unified as `uΓ = V + Ω × (x-X)` (2D scalar-spin specialization included).
-- `step_fsi!`: one-pass split coupling.
-- `step_fsi_strong!`: fixed-point strong coupling with optional Aitken relaxation.
-- `simulate_fsi!` runs repeated split steps and returns history diagnostics.
+- `test/dev_pressure_outlet_mms.jl` (manual probe; not in `runtests.jl`)
+- `test/dev_outlet_row_equivalence.jl` (included in `runtests.jl`)
+- `test/dev_traction_box_probe.jl` (included in `runtests.jl`)
 
-Current scope/limits:
+## Current Limitations
 
-- single rigid body,
-- 3D translational free fall is supported; 3D rotational dynamics currently target isotropic inertia use-cases,
-- no contact/collision model (stop before wall contact in free-fall runs).
+- cut/interface velocity Neumann and periodic BCs are not implemented,
+- two-phase interface is fixed (no moving-interface two-phase model),
+- FSI is single rigid body only,
+- no rigid-body contact/collision model,
+- no deformable-body coupling model.
