@@ -1704,9 +1704,12 @@ end
     iface = interface_active_indices(model.cap_p1)
     @test !isempty(iface)
     for α in 1:2
-        rows = model.layout.ugamma[α]
-        rowvals = rsys[rows]
-        @test maximum(abs, rowvals[iface]) < 5e-7
+        rows_t = model.layout.ugamma1[α]
+        rows_j = model.layout.ugamma2[α]
+        rowvals_t = rsys[rows_t]
+        rowvals_j = rsys[rows_j]
+        @test maximum(abs, rowvals_t[iface]) < 5e-7
+        @test maximum(abs, rowvals_j[iface]) < 5e-7
     end
 
     p1 = sys.x[model.layout.pomega1]
