@@ -1,3 +1,6 @@
+# Developer probe/regression for outlet-row algebra equivalence.
+# This file is intentionally retained and included by `test/runtests.jl`.
+
 using Test
 using SparseArrays
 using StaticArrays: SVector

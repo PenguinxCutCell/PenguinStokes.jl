@@ -419,6 +419,15 @@ Defaults to zero for built-in parameter/state types.
 external_torque(p::RigidBodyParams2D{T}, s::RigidBodyState2D{T}, t::T) where {T} = zero(T)
 external_torque(p::RigidBodyParams3D{T}, s::RigidBodyState3D{T}, t::T) where {T} = SVector{3,T}(zero(T), zero(T), zero(T))
 
+"""
+    rigid_boundary_velocity(x, X, V, omega_or_Omega)
+    rigid_boundary_velocity(x, state)
+
+Rigid-body boundary velocity.
+
+- 2D: `u_b = V + ω * k × (x - X)`
+- 3D: `u_b = V + Ω × (x - X)`
+"""
 @inline function rigid_boundary_velocity(
     x::SVector{2,T},
     X::SVector{2,T},
@@ -442,9 +451,27 @@ end
 @inline rigid_boundary_velocity(x::SVector{2,T}, s::RigidBodyState2D{T}) where {T} = rigid_boundary_velocity(x, s.X, s.V, s.omega)
 @inline rigid_boundary_velocity(x::SVector{3,T}, s::RigidBodyState3D{T}) where {T} = rigid_boundary_velocity(x, s.X, s.V, s.Omega)
 
+"""
+    rigid_velocity_2d(x, X, V, omega)
+    rigid_velocity(x, state2d)
+
+2D convenience wrappers for `rigid_boundary_velocity`.
+"""
 @inline rigid_velocity_2d(x::SVector{2,T}, X::SVector{2,T}, V::SVector{2,T}, omega::T) where {T} = rigid_boundary_velocity(x, X, V, omega)
+
+"""
+    rigid_velocity(x, state2d)
+
+2D convenience wrapper for `rigid_boundary_velocity(x, state2d)`.
+"""
 @inline rigid_velocity(x::SVector{2,T}, s::RigidBodyState2D{T}) where {T} = rigid_boundary_velocity(x, s)
 
+"""
+    rigid_body_levelset(shape, statefun)
+
+Build a moving level-set callback `body(x..., t)` from a rigid shape and a
+state callback `statefun(t)`.
+"""
 function rigid_body_levelset(shape::AbstractRigidShape, statefun)
     return function (args...)
         nargs = length(args)
@@ -464,6 +491,12 @@ function rigid_body_levelset(shape::AbstractRigidShape, statefun)
     end
 end
 
+"""
+    rigid_cut_bc_tuple(statefun, Val(N))
+
+Build per-component cut-boundary Dirichlet BC tuple for rigid-body motion,
+compatible with `MovingStokesModelMono(...; bc_cut_u=...)`.
+"""
 function rigid_cut_bc_tuple(statefun, ::Val{N}) where {N}
     return ntuple(d -> Dirichlet((args...) -> begin
         length(args) == N + 1 || throw(ArgumentError("cut BC callback expects $N spatial coordinates plus time"))
@@ -474,4 +507,9 @@ function rigid_cut_bc_tuple(statefun, ::Val{N}) where {N}
     end), N)
 end
 
+"""
+    rigid_cut_bc_tuple_2d(statefun)
+
+2D convenience wrapper for `rigid_cut_bc_tuple(statefun, Val(2))`.
+"""
 rigid_cut_bc_tuple_2d(statefun) = rigid_cut_bc_tuple(statefun, Val(2))

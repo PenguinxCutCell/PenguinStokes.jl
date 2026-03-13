@@ -1,5 +1,4 @@
 using Test
-using Statistics: mean
 using StaticArrays: SVector
 using CartesianGrids: CartesianGrid
 using PenguinBCs: BorderConditions, Dirichlet
@@ -7,6 +6,14 @@ using PenguinStokes
 
 function _active_velocity_indices(cap)
     return findall(isfinite.(cap.buf.V) .& (cap.buf.V .> 0.0))
+end
+
+function _avg(vals, idx)
+    s = 0.0
+    @inbounds for i in idx
+        s += vals[i]
+    end
+    return s / length(idx)
 end
 
 @testset "Two-phase static circle spurious-current regression (2D)" begin
@@ -64,7 +71,7 @@ end
     p2 = sys.x[model.layout.pomega2]
     idx_p1 = findall(PenguinStokes._pressure_activity(model.cap_p1))
     idx_p2 = findall(PenguinStokes._pressure_activity(model.cap_p2))
-    dp_num = mean(p1[idx_p1]) - mean(p2[idx_p2])
+    dp_num = _avg(p1, idx_p1) - _avg(p2, idx_p2)
     jump_relerr = abs(dp_num - dp_th) / abs(dp_th)
 
     @test uinf < 0.2

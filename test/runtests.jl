@@ -1849,6 +1849,7 @@ end
 
 include("moving_boundary_stokes_tests.jl")
 include("fsi_tests.jl")
-include("test_outlet_row_equivalence.jl")
-include("test_traction_box_debug.jl")
+include("api_smoke_tests.jl")
+include("dev_outlet_row_equivalence.jl")
+include("dev_traction_box_probe.jl")
 include("two_phase_static_circle_spurious_current_tests.jl")

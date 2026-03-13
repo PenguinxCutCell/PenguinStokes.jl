@@ -1,97 +1,118 @@
-**Stokes model and discretization**
+# Models and Equations
 
-This package assembles monophasic and fixed-interface two-phase Stokes systems on MAC-style staggered grids with cut-cell geometry.
+This page documents the PDE models represented by the current implementation.
+The source/tests/examples are treated as the ground truth for supported scope.
 
-Unknown ordering
+## 1. Monophasic Steady Stokes
 
-For `N` dimensions and `nt = prod(grid.n)`:
+For velocity `u` and pressure `p` in fluid region `Ω`:
 
-`x = [uomega_1; ugamma_1; ...; uomega_N; ugamma_N; pomega]`
+```math
+-\nabla\cdot\left(2\mu D(u)\right) + \nabla p = f, \qquad
+\nabla\cdot u = 0,
+```
 
-Two-phase fixed-interface ordering:
+with `D(u) = (\nabla u + \nabla u^T)/2`.
 
-`x = [uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma_1; ...; ugamma_N; pomega1; pomega2]`
+Discrete representation in `StokesModelMono`:
 
-Discrete structure
+- MAC staggered unknowns on per-component velocity grids (`uomega`) and pressure
+  grid (`pomega`),
+- cut/interface trace unknowns `ugamma`,
+- momentum diffusion-like blocks from cut-cell operators,
+- split pressure-gradient/divergence coupling,
+- row overwrite for boundary/interface constraints,
+- pressure gauge replacement to remove nullspace.
 
-- Momentum block per component uses `G' * Winv * G` / `G' * Winv * H` diffusion-style operators on velocity grids.
-- Pressure coupling is assembled via split gradient/divergence blocks built from pressure operators.
-- Interface/cut rows enforce `ugamma = g_cut` (Dirichlet currently).
-- Continuity rows enforce incompressibility with pressure gauge replacement for nullspace control.
-- `PinPressureGauge(index=...)` now replaces the pressure equation at that same DOF (`pomega[index]`), rather than always overwriting the first pressure row.
-- `MeanPressureGauge()` now enforces a volume-weighted zero-mean pressure on active pressure cells.
+## 2. Monophasic Unsteady Stokes
 
-Two-phase interface rows
+```math
+\rho \partial_t u - \nabla\cdot\left(2\mu D(u)\right) + \nabla p = f,
+\qquad \nabla\cdot u = 0.
+```
 
-- `StokesModelTwoPhase` uses shared `ugamma` traces and two pressure blocks (`pomega1`, `pomega2`).
-- Interface rows are assembled as traction-balance equations (pressure + viscous stress terms) with optional forcing `interface_force`.
-- Row masking keeps only overlap-support interface rows where both pressure-interface geometry and velocity-trace support are present, avoiding singular uncoupled trace modes.
+Implemented via `assemble_unsteady!` / `solve_unsteady!` with theta scheme:
 
-Wall closure on staggered grids
+- `:BE` (`\theta = 1`),
+- `:CN` (`\theta = 1/2`),
+- numeric `theta in [0,1]`.
 
-- On staggered velocity meshes, a box wall can be either:
-- `collocated` with a velocity DOF (the DOF lies on the wall plane), or
-- `non-collocated` (the nearest DOF is inside the domain).
-- This distinction is geometric and depends on the component grid (`ux`, `uy`, ...), not only on the side label.
-- For Dirichlet velocity walls, the package now applies:
-- strong elimination (`u = u_wall`) only for collocated rows when `strong_wall_bc=true`,
-- distance-based weak closure (`a = mu * Aface / dist`) for non-collocated rows, using the true DOF-to-wall distance.
-- Using a fixed half-step distance on non-collocated rows can produce first-order wall truncation, especially on outer-box high-side rows.
+Mass terms are added on momentum omega rows; continuity and gauge remain
+algebraic constraints.
 
-Pressure wall handling (`bc_p`)
+## 3. Moving-Boundary Monophasic Stokes
 
-- `bc_p` is optional (`nothing` by default).
-- When `bc_p === nothing`, pressure wall rows are not modified; the usual continuity + gauge system is assembled.
-- When `bc_p` is provided, box pressure wall constraints (Dirichlet/Neumann) can be imposed explicitly.
-- This is intended for cases where pressure-wall data is known/desired (for example MMS studies with prescribed normal pressure derivative).
-- Pressure errors should generally be evaluated with a shift-invariant metric (`p - mean(p)` or equivalent), since raw pressure levels remain gauge-dependent.
+`MovingStokesModelMono` supports prescribed moving embedded boundaries:
 
-Outer-box Stokes traction BCs (`bc_u`)
+- geometry callback `body(x..., t)` (or static `body(x...)`),
+- per-component cut velocity BC `bc_cut_u`,
+- slab-based assembly over `[t_n, t_{n+1}]` using `SpaceTimeCartesianGrid`
+  reduction,
+- strong end-time trace enforcement on `ugamma` rows,
+- activity masking based on end-time support.
 
-- In addition to scalar velocity BCs (`Dirichlet`, `Neumann`, `Periodic`), outer-box sides now support:
-- `PressureOutlet(pout)` for `σn = -pout*n`,
-- `DoNothing()` for homogeneous traction `σn = 0`,
-- `Traction(t)` for prescribed full traction vector `σn = t`.
-- `Symmetry()` for axis-aligned free-slip/symmetry walls:
-  - normal velocity: `u⋅n = 0`,
-  - tangential traction: `(I - n⊗n)σn = 0`.
-- Traction BCs are enforced with side-based row overwrite of boundary-adjacent momentum rows, including:
-- pressure coupling in normal traction rows,
-- symmetric-gradient cross coupling in tangential traction rows (`∂ₙu_t + ∂_t u_n`).
-- Symmetry sides are also assembled with side-based row overwrite:
-  - the normal component row is set strongly to zero velocity,
-  - tangential component rows enforce homogeneous tangential traction.
-- A traction side must be declared on all velocity components for that side.
-- `bc_p` is not allowed on traction sides (pressure is already part of the traction law there).
-- A symmetry side must also be declared on all velocity components for that side.
-- `bc_p` is not allowed on symmetry sides.
+This is a prescribed-motion moving-boundary formulation, not deformable-body FSI.
 
-Embedded-boundary force and stress post-processing
+## 4. Fixed-Interface Two-Phase Stokes
 
-- `embedded_boundary_quantities(model, x; ...)` computes stress tensors, traction vectors, and integrated force density on pressure-grid cut cells.
-- `integrated_embedded_force(model, x; ...)` returns total force, split into pressure and viscous parts, plus torque.
-- Pressure traction uses `p` trace reconstruction at the interface (`:none` or `:linear`).
-- Viscous traction uses `mu * (grad(u) + grad(u)')` from the assembled staggered operators.
+For phases `k in {1,2}` in fixed subdomains `Ω_k`:
 
-Unsteady formulation
+```math
+-\nabla\cdot\left(2\mu_k D(u_k)\right) + \nabla p_k = f_k,
+\qquad \nabla\cdot u_k = 0.
+```
 
-`assemble_unsteady!` supports theta schemes (`:BE`, `:CN`, numeric `theta`) by adding mass `(rho/dt) * V` to momentum omega blocks and corresponding RHS history terms.
+Current interface formulation in `StokesModelTwoPhase`:
 
-For `StokesModelTwoPhase`, unsteady assembly applies the same theta update independently on each phase momentum block (`uomega1`, `uomega2`) while keeping interface traction rows algebraic at `t_{n+1}`.
+- shared interface velocity trace unknowns `ugamma` (velocity continuity path),
+- phase-wise pressure blocks `pomega1`, `pomega2`,
+- traction-balance rows on `ugamma` with optional interface forcing
+  `interface_force`,
+- per-phase `mu1`, `mu2`, `rho1`, `rho2` supported.
 
-Moving embedded boundary (prescribed velocity)
+Current scope is fixed-interface (no geometric interface evolution in two-phase
+constructor path).
 
-- `MovingStokesModelMono` supports one-phase unsteady Stokes with time-dependent level-set geometry `body(x..., t)` (or static `body(x...)`) and prescribed interface motion through `bc_cut_u`.
-- `assemble_unsteady_moving!` builds slab-integrated operators between `t_n` and `t_{n+1}` using `SpaceTimeCartesianGrid` reduction, then enforces cut-trace rows strongly at `t_{n+1}`.
-- Outer wall BC (`bc_u`, optional `bc_p`) and pressure gauge are applied on end-time capacities, and row-activity masking is computed from end-time active cells/interface support.
+## 5. Pressure Gauges
 
-Rigid-body FSI wrapper (v0)
+A gauge is required to remove pressure nullspace.
 
-- `StokesFSIProblem` adds a translation-only rigid-body ODE loop around `MovingStokesModelMono`.
-- `step_fsi!` performs one coupled step:
-  - predicts rigid translation over the slab,
-  - solves `solve_unsteady_moving!`,
-  - evaluates end-time force/torque with `integrated_embedded_force(endtime_static_model(...), ...)`,
-  - advances rigid-body state with a first-order ODE scheme (`:symplectic_euler` or `:forward_euler`).
-- `simulate_fsi!` runs repeated coupled steps and records diagnostics.
-- Current scope: single rigid body, translation only, no contact/collision handling.
+- `PinPressureGauge(index=...)`: pin one pressure DOF.
+- `MeanPressureGauge()`: enforce volume-weighted zero mean over active pressure
+  cells.
+
+Applied for mono/two-phase/moving models by row replacement in assembled systems.
+
+## 6. Boundary and Interface Scope (Current)
+
+Implemented:
+
+- outer velocity BCs: `Dirichlet`, `Neumann`, `Periodic`, plus Stokes
+  traction-family side BCs (`Traction`, `PressureOutlet`, `DoNothing`,
+  `Symmetry`),
+- optional outer pressure BC `bc_p` with `Dirichlet`/`Neumann`/`Periodic`
+  handling,
+- cut/interface velocity Dirichlet enforcement on `ugamma`.
+
+Missing/unsupported in current code path:
+
+- cut/interface velocity `Neumann` and `Periodic` (`ArgumentError`),
+- moving two-phase interface model,
+- deformable-body coupling,
+- multi-body/contact models in FSI.
+
+## 7. FSI Scope and Limits
+
+Rigid-body FSI wrappers are implemented beyond translation-only:
+
+- 2D/3D rigid states and parameters,
+- rotational state updates (2D scalar spin, 3D angular velocity + orientation),
+- split one-pass coupling (`step_fsi!`),
+- strong fixed-point coupling with optional Aitken relaxation
+  (`step_fsi_strong!`).
+
+Current limits:
+
+- single rigid body,
+- no contact/collision handling,
+- no deformable body model.
