@@ -16,7 +16,7 @@ export StokesLayoutTwoPhase, StokesModelTwoPhase
 export MovingStokesModelMono
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
 export assemble_unsteady_moving!, solve_unsteady_moving!
-export embedded_boundary_quantities, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
+export embedded_boundary_quantities, embedded_boundary_pressure, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
 export RigidBodyState, RigidBodyParams, RigidBodyState2D, RigidBodyState3D
 export RigidBodyParams2D, RigidBodyParams3D
 export Circle, Sphere, Ellipse, Ellipsoid
@@ -3087,6 +3087,21 @@ function _pressure_trace(
     throw(ArgumentError("unknown pressure reconstruction `$reconstruction`; expected :none or :linear"))
 end
 
+function _pressure_gradient_reconstruction(
+    model::StokesModelMono{N,T},
+    pω::AbstractVector{T},
+    reconstruction::Symbol,
+) where {N,T}
+    nt = model.cap_p.ntotal
+    pγ_seed = zeros(T, nt)
+    if reconstruction === :linear
+        pγ_seed .= pω
+    elseif reconstruction !== :none
+        throw(ArgumentError("unknown pressure reconstruction `$reconstruction`; expected :none or :linear"))
+    end
+    return _scalar_gradient(model.op_p, pω, pγ_seed)
+end
+
 @inline function _stress_tensor(
     μ::T,
     G::SMatrix{N,N,T},
@@ -3136,13 +3151,7 @@ function embedded_boundary_quantities(
     pω = Vector{T}(x[layout.pomega])
 
     grad_u = ntuple(d -> _scalar_gradient(model.op_u[d], uω[d], uγ[d]), N)
-    pγ_seed = zeros(T, nt)
-    if pressure_reconstruction === :linear
-        pγ_seed .= pω
-    elseif pressure_reconstruction !== :none
-        throw(ArgumentError("unknown pressure reconstruction `$pressure_reconstruction`; expected :none or :linear"))
-    end
-    grad_p = _scalar_gradient(model.op_p, pω, pγ_seed)
+    grad_p = _pressure_gradient_reconstruction(model, pω, pressure_reconstruction)
 
     zero_vec = _zero_svector(T, Val(N))
     zero_sig = zero(SMatrix{N,N,T,N * N})
@@ -3221,6 +3230,88 @@ function embedded_boundary_quantities(
     kwargs...,
 ) where {N,T}
     return embedded_boundary_quantities(model, sys.x; kwargs...)
+end
+
+"""
+    embedded_boundary_pressure(model, x; pressure_reconstruction=:linear)
+    embedded_boundary_pressure(model, sys; pressure_reconstruction=:linear)
+
+Reconstruct pressure traces on embedded-boundary pressure cells for
+`StokesModelMono`.
+
+The pressure unknown is the bulk/cell pressure `pω`, and interface pressure is
+reconstructed at the embedded-interface centroid `C_γ`:
+- `:none`: `pγ = pω[i]`
+- `:linear`: `pγ = pω[i] + ∇p[i] ⋅ (C_γ[i] - C_ω[i])`
+
+Returns a named tuple with:
+- `pressure`: reconstructed `pγ` on pressure cells (`NaN` away from interface)
+- `interface_indices`: active embedded-interface pressure-cell indices
+- `centers`: interface centroids `C_γ` on active indices
+- `normals`: interface normals `n_γ` on active indices
+- `measure`: interface measure `Γ` on active indices
+- `force_density`: pressure-force contributions `(-pγ*n_γ)*Γ` on pressure cells
+- `force`: integrated pressure force
+"""
+function embedded_boundary_pressure(
+    model::StokesModelMono{N,T},
+    x::AbstractVector;
+    pressure_reconstruction::Symbol=:linear,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
+    nt = model.cap_p.ntotal
+
+    pω = Vector{T}(x[model.layout.pomega])
+    grad_p = _pressure_gradient_reconstruction(model, pω, pressure_reconstruction)
+
+    pressure = fill(T(NaN), nt)
+    zero_vec = _zero_svector(T, Val(N))
+    force_density = fill(zero_vec, nt)
+    interface_indices = Int[]
+    centers = SVector{N,T}[]
+    normals = SVector{N,T}[]
+    measure = T[]
+
+    Fp = zeros(T, N)
+
+    cap = model.cap_p
+    @inbounds for i in 1:cap.ntotal
+        _is_interface_index(cap, i) || continue
+        push!(interface_indices, i)
+
+        Γi = cap.buf.Γ[i]
+        nγi = cap.n_γ[i]
+        xγi = cap.C_γ[i]
+        pγi = _pressure_trace(model, pω, grad_p, i, xγi, pressure_reconstruction)
+        fpvec = Γi .* (-pγi .* nγi)
+
+        pressure[i] = pγi
+        force_density[i] = fpvec
+        Fp .+= fpvec
+
+        push!(centers, xγi)
+        push!(normals, nγi)
+        push!(measure, Γi)
+    end
+
+    return (
+        pressure=pressure,
+        interface_indices=interface_indices,
+        centers=centers,
+        normals=normals,
+        measure=measure,
+        force_density=force_density,
+        force=SVector{N,T}(Tuple(Fp)),
+    )
+end
+
+function embedded_boundary_pressure(
+    model::StokesModelMono{N,T},
+    sys::LinearSystem{T};
+    pressure_reconstruction::Symbol=:linear,
+) where {N,T}
+    return embedded_boundary_pressure(model, sys.x; pressure_reconstruction=pressure_reconstruction)
 end
 
 """
