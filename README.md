@@ -130,7 +130,7 @@ Representative scripts:
 - `examples/04_mms_convergence.jl` (mono MMS convergence)
 - `examples/06_mms_convergence_embedded_outside_circle.jl` (embedded-interface MMS)
 - `examples/08_two_phase_mms_fixed_interface.jl` (two-phase traction-jump equilibrium)
-- `examples/two_phase_static_circle_spurious_current.jl` (static drop spurious-current benchmark)
+- `examples/27_two_phase_static_circle_spurious_current.jl` (static drop spurious-current benchmark; includes simple CairoMakie snapshot + Laplace sweep)
 - `examples/09_two_phase_planar_couette.jl`, `examples/10_two_phase_planar_poiseuille.jl`
 - `examples/13_unsteady_moving_body_translation.jl`, `examples/25_moving_mms_time_schemes.jl`
 - `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl` (FSI split vs strong)

@@ -7,7 +7,7 @@ using StaticArrays
 using CartesianGeometry: GeometricMoments, geometric_moments, nan
 using CartesianGrids: CartesianGrid, SpaceTimeCartesianGrid, grid1d, meshsize
 using CartesianOperators: AssembledCapacity, DiffusionOps, assembled_capacity, each_boundary_cell, periodic_flags, side_info
-using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, Symmetry, eval_bc, validate_borderconditions!
+using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, Symmetry, InterfaceConditions, ScalarJump, FluxJump, eval_bc, validate_borderconditions!
 using PenguinSolverCore: LinearSystem, solve!
 
 export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge
@@ -16,7 +16,7 @@ export StokesLayoutTwoPhase, StokesModelTwoPhase
 export MovingStokesModelMono
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
 export assemble_unsteady_moving!, solve_unsteady_moving!
-export embedded_boundary_quantities, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
+export embedded_boundary_quantities, embedded_boundary_pressure, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
 export RigidBodyState, RigidBodyParams, RigidBodyState2D, RigidBodyState3D
 export RigidBodyParams2D, RigidBodyParams3D
 export Circle, Sphere, Ellipse, Ellipsoid
@@ -69,15 +69,23 @@ end
     StokesLayoutTwoPhase{N}
 
 Unknown ordering for fixed-interface two-phase Stokes:
-`[uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma_1; ...; ugamma_N; pomega1; pomega2]`.
+`[uomega1_1; ...; uomega1_N; uomega2_1; ...; uomega2_N; ugamma1_1; ...; ugamma1_N; ugamma2_1; ...; ugamma2_N; pomega1; pomega2]`.
 """
 struct StokesLayoutTwoPhase{N}
     nt::Int
     uomega1::NTuple{N,UnitRange{Int}}
     uomega2::NTuple{N,UnitRange{Int}}
-    ugamma::NTuple{N,UnitRange{Int}}
+    ugamma1::NTuple{N,UnitRange{Int}}
+    ugamma2::NTuple{N,UnitRange{Int}}
     pomega1::UnitRange{Int}
     pomega2::UnitRange{Int}
+end
+
+@inline function Base.getproperty(layout::StokesLayoutTwoPhase, s::Symbol)
+    if s === :ugamma
+        return getfield(layout, :ugamma1)
+    end
+    return getfield(layout, s)
 end
 
 function StokesLayout(nt::Int, ::Val{N}) where {N}
@@ -113,7 +121,12 @@ function StokesLayoutTwoPhase(nt::Int, ::Val{N}) where {N}
         start += nt
         r
     end, N)
-    ugamma = ntuple(d -> begin
+    ugamma1 = ntuple(d -> begin
+        r = start:(start + nt - 1)
+        start += nt
+        r
+    end, N)
+    ugamma2 = ntuple(d -> begin
         r = start:(start + nt - 1)
         start += nt
         r
@@ -121,7 +134,7 @@ function StokesLayoutTwoPhase(nt::Int, ::Val{N}) where {N}
     pomega1 = start:(start + nt - 1)
     start += nt
     pomega2 = start:(start + nt - 1)
-    return StokesLayoutTwoPhase{N}(nt, uomega1, uomega2, ugamma, pomega1, pomega2)
+    return StokesLayoutTwoPhase{N}(nt, uomega1, uomega2, ugamma1, ugamma2, pomega1, pomega2)
 end
 
 """
@@ -145,7 +158,7 @@ mutable struct StokesModelMono{N,T,FT,BT}
     force::FT
     bc_u::NTuple{N,BorderConditions}
     bc_p::Union{Nothing,BorderConditions}
-    bc_cut::AbstractBoundary
+    bc_cut::NTuple{N,AbstractBoundary}
     gauge::AbstractPressureGauge
     strong_wall_bc::Bool
     layout::StokesLayout{N}
@@ -157,14 +170,14 @@ end
 """
     StokesModelTwoPhase{N,T}
 
-Fixed-interface two-phase Stokes model with shared interface velocity trace
-`ugamma` and one pressure block per phase.
+Fixed-interface two-phase Stokes model with phase-wise interface velocity traces
+`ugamma1`, `ugamma2` and one pressure block per phase.
 
 Use constructors
 `StokesModelTwoPhase(gridp, body, mu1, mu2; ...)` or
 `StokesModelTwoPhase(cap_p1, op_p1, ..., cap_p2, op_p2, ...; ...)`.
 """
-mutable struct StokesModelTwoPhase{N,T,FT1,FT2,IFT,BT}
+mutable struct StokesModelTwoPhase{N,T,FT1,FT2,IFT,IJT,BT}
     gridp::CartesianGrid{N,T}
     gridu::NTuple{N,CartesianGrid{N,T}}
 
@@ -185,6 +198,8 @@ mutable struct StokesModelTwoPhase{N,T,FT1,FT2,IFT,BT}
     force1::FT1
     force2::FT2
     interface_force::IFT
+    interface_jump::IJT
+    bc_interface::Union{Nothing,NTuple{N,InterfaceConditions}}
     bc_u::NTuple{N,BorderConditions}
     bc_p::Union{Nothing,BorderConditions}
     gauge::AbstractPressureGauge
@@ -235,6 +250,10 @@ function _default_interface_force(::Type{T}, ::Val{N}) where {T,N}
     return ntuple(_ -> zero(T), N)
 end
 
+function _default_interface_jump(::Type{T}, ::Val{N}) where {T,N}
+    return ntuple(_ -> zero(T), N)
+end
+
 function _normalize_bc_tuple(bc_u::NTuple{N,BorderConditions}) where {N}
     return bc_u
 end
@@ -253,6 +272,34 @@ end
 
 function _normalize_cut_bc_tuple(bc_cut_u::AbstractBoundary, ::Val{N}) where {N}
     return ntuple(_ -> bc_cut_u, N)
+end
+
+function _normalize_interface_bc(::Nothing, ::Val{N}) where {N}
+    return nothing
+end
+
+function _normalize_interface_bc(ic::InterfaceConditions, ::Val{N}) where {N}
+    return ntuple(_ -> ic, N)
+end
+
+function _normalize_interface_bc(ic::NTuple{N,InterfaceConditions}, ::Val{N}) where {N}
+    return ic
+end
+
+function _validate_stokes_interface_bcs!(
+    bc_interface::Union{Nothing,NTuple{N,InterfaceConditions}},
+) where {N}
+    isnothing(bc_interface) && return nothing
+    @inbounds for d in 1:N
+        ic = bc_interface[d]
+        if !(ic.scalar === nothing) && !(ic.scalar isa ScalarJump)
+            throw(ArgumentError("two-phase Stokes interface scalar condition for component $d must be ScalarJump or nothing"))
+        end
+        if !(ic.flux === nothing) && !(ic.flux isa FluxJump)
+            throw(ArgumentError("two-phase Stokes interface flux condition for component $d must be FluxJump or nothing"))
+        end
+    end
+    return nothing
 end
 
 function _validate_pressure_bc(
@@ -520,6 +567,76 @@ function _interface_force_component(interface_force, d::Int, x::SVector{N,T}, t:
     throw(ArgumentError("unsupported interface forcing type $(typeof(interface_force))"))
 end
 
+@inline function _as_interface_force_vector(y, ::Val{N}, ::Type{T}) where {N,T}
+    if y isa Number
+        vy = convert(T, y)
+        return SVector{N,T}(ntuple(_ -> vy, N))
+    elseif y isa Tuple || y isa AbstractVector
+        length(y) == N ||
+            throw(ArgumentError("interface forcing callback must return scalar or length-$N vector"))
+        return SVector{N,T}(ntuple(d -> convert(T, y[d]), N))
+    end
+    throw(ArgumentError("interface forcing callback must return scalar or length-$N vector"))
+end
+
+function _interface_force_vector(interface_force, x::SVector{N,T}, t::T) where {N,T}
+    if interface_force isa Number
+        fv = convert(T, interface_force)
+        return SVector{N,T}(ntuple(_ -> fv, N))
+    elseif interface_force isa NTuple{N,Any}
+        return SVector{N,T}(ntuple(d -> begin
+            fd = interface_force[d]
+            if fd isa Number
+                return convert(T, fd)
+            elseif fd isa Function
+                if applicable(fd, x..., t)
+                    return convert(T, fd(x..., t))
+                elseif applicable(fd, x...)
+                    return convert(T, fd(x...))
+                elseif applicable(fd, x, t)
+                    return convert(T, fd(x, t))
+                elseif applicable(fd, x)
+                    return convert(T, fd(x))
+                end
+                throw(ArgumentError("interface forcing callback for component $d must accept (x...), (x..., t), (x), or (x, t)"))
+            end
+            throw(ArgumentError("unsupported interface forcing entry type $(typeof(fd)) for component $d"))
+        end, N))
+    elseif interface_force isa Function
+        if applicable(interface_force, x..., t)
+            return _as_interface_force_vector(interface_force(x..., t), Val(N), T)
+        elseif applicable(interface_force, x...)
+            return _as_interface_force_vector(interface_force(x...), Val(N), T)
+        elseif applicable(interface_force, x, t)
+            return _as_interface_force_vector(interface_force(x, t), Val(N), T)
+        elseif applicable(interface_force, x)
+            return _as_interface_force_vector(interface_force(x), Val(N), T)
+        end
+        throw(ArgumentError("interface forcing callback must accept (x...), (x..., t), (x), or (x, t)"))
+    end
+    throw(ArgumentError("unsupported interface forcing type $(typeof(interface_force))"))
+end
+
+@inline function _consistent_interface_force_component(
+    fγ::SVector{N,T},
+    nγ::SVector{N,T},
+    d::Int,
+) where {N,T}
+    fnorm = norm(fγ)
+    nnorm = norm(nγ)
+    if fnorm > zero(T) && nnorm > zero(T)
+        c = dot(fγ, nγ) / (fnorm * nnorm)
+        # When the prescribed traction is (nearly) normal, use the same
+        # discrete normal moments as the pressure coupling to preserve exact
+        # local force balance for constant jump states.
+        if abs(abs(c) - one(T)) <= convert(T, 1e-6)
+            s = c >= zero(T) ? one(T) : -one(T)
+            return s * fnorm * nγ[d]
+        end
+    end
+    return fγ[d]
+end
+
 function _cut_values(cap::AssembledCapacity{N,T}, bc_cut::AbstractBoundary, t::T) where {N,T}
     out = zeros(T, cap.ntotal)
     if bc_cut isa Dirichlet
@@ -701,38 +818,14 @@ function _stokes_row_activity(model::StokesModelTwoPhase{N,T}, A::SparseMatrixCS
         for i in 1:model.cap_u1[d].ntotal
             active[layout.uomega1[d][i]] = aomega1[i]
             active[layout.uomega2[d][i]] = aomega2[i]
-            active[layout.ugamma[d][i]] = (agamma1[i] || agamma2[i]) && agamma_p[i]
+            has_gamma = (agamma1[i] || agamma2[i]) && agamma_p[i]
+            active[layout.ugamma1[d][i]] = has_gamma
+            active[layout.ugamma2[d][i]] = has_gamma
         end
     end
 
     p1active = _pressure_activity(model.cap_p1)
     p2active = _pressure_activity(model.cap_p2)
-    u1support = ntuple(d -> _cell_activity_masks(model.cap_u1[d])[1], N)
-    u2support = ntuple(d -> _cell_activity_masks(model.cap_u2[d])[1], N)
-
-    @inbounds for i in 1:model.cap_p1.ntotal
-        p1active[i] || continue
-        supported = false
-        for d in 1:N
-            if u1support[d][i]
-                supported = true
-                break
-            end
-        end
-        p1active[i] = supported
-    end
-
-    @inbounds for i in 1:model.cap_p2.ntotal
-        p2active[i] || continue
-        supported = false
-        for d in 1:N
-            if u2support[d][i]
-                supported = true
-                break
-            end
-        end
-        p2active[i] = supported
-    end
 
     p1first = first(layout.pomega1)
     p1last = last(layout.pomega1)
@@ -2239,7 +2332,7 @@ function _assemble_core!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesM
         force_vec = _force_values(model, d, t)
         _insert_vec!(b, layout.uomega[d], model.cap_u[d].V * force_vec)
 
-        cut_vec = _cut_values(model.cap_u[d], model.bc_cut, t)
+        cut_vec = _cut_values(model.cap_u[d], model.bc_cut[d], t)
         _insert_vec!(b, layout.ugamma[d], cut_vec)
     end
 
@@ -2391,22 +2484,57 @@ function _stokes_blocks(model::StokesModelTwoPhase{N,T}) where {N,T}
     return (; nt=model.cap_p1.ntotal, phase1, phase2)
 end
 
-function _interface_force_values(
+function _interface_condition_values(
     model::StokesModelTwoPhase{N,T},
     d::Int,
     gamma::AbstractVector{T},
+    normals::NTuple{N,AbstractVector{T}},
     t::T,
 ) where {N,T}
     nt = length(gamma)
-    out = zeros(T, nt)
+    α1 = ones(T, nt)
+    α2 = ones(T, nt)
+    β1 = ones(T, nt)
+    β2 = ones(T, nt)
+    rhs_jump = zeros(T, nt)
+    rhs_trac = zeros(T, nt)
+
+    ic = isnothing(model.bc_interface) ? nothing : model.bc_interface[d]
+    sbc = isnothing(ic) ? nothing : ic.scalar
+    fbc = isnothing(ic) ? nothing : ic.flux
+    if !(sbc === nothing) && !(sbc isa ScalarJump)
+        throw(ArgumentError("two-phase Stokes interface scalar condition for component $d must be ScalarJump or nothing"))
+    end
+    if !(fbc === nothing) && !(fbc isa FluxJump)
+        throw(ArgumentError("two-phase Stokes interface flux condition for component $d must be FluxJump or nothing"))
+    end
+
     @inbounds for i in 1:nt
         Γi = gamma[i]
         if !(isfinite(Γi) && Γi > zero(T))
             continue
         end
-        out[i] = Γi * _interface_force_component(model.interface_force, d, model.cap_p1.C_γ[i], t)
+        xi = model.cap_p1.C_γ[i]
+        if sbc === nothing
+            rhs_jump[i] = _interface_force_component(model.interface_jump, d, xi, t)
+        else
+            sb = sbc::ScalarJump
+            α1[i] = convert(T, eval_bc(sb.α₁, xi, t))
+            α2[i] = convert(T, eval_bc(sb.α₂, xi, t))
+            rhs_jump[i] = convert(T, eval_bc(sb.value, xi, t))
+        end
+        if fbc === nothing
+            fγ = _interface_force_vector(model.interface_force, xi, t)
+            nγ = SVector{N,T}(ntuple(k -> normals[k][i], N))
+            rhs_trac[i] = Γi * _consistent_interface_force_component(fγ, nγ, d)
+        else
+            fb = fbc::FluxJump
+            β1[i] = convert(T, eval_bc(fb.β₁, xi, t))
+            β2[i] = convert(T, eval_bc(fb.β₂, xi, t))
+            rhs_trac[i] = Γi * convert(T, eval_bc(fb.value, xi, t))
+        end
     end
-    return out
+    return α1, α2, β1, β2, rhs_jump, rhs_trac
 end
 
 function _assemble_interface_traction_rows!(
@@ -2421,31 +2549,36 @@ function _assemble_interface_traction_rows!(
     phase2 = blocks.phase2
 
     @inbounds for α in 1:N
-        rows = layout.ugamma[α]
+        rows_trac = layout.ugamma1[α]
+        rows_jump = layout.ugamma2[α]
+        α1, α2, β1, β2, rhs_jump, rhs_trac = _interface_condition_values(model, α, phase1.gamma, phase1.normals, t)
 
-        Tp1 = spdiagm(0 => -(phase1.gamma .* phase1.normals[α]))
-        Tp2 = spdiagm(0 => -(phase2.gamma .* phase2.normals[α]))
-        _insert_block!(A, rows, layout.pomega1, Tp1)
-        _insert_block!(A, rows, layout.pomega2, Tp2)
+        Tp1 = spdiagm(0 => -(β1 .* phase1.gamma .* phase1.normals[α]))
+        Tp2 = spdiagm(0 => -(β2 .* phase2.gamma .* phase2.normals[α]))
+        _insert_block!(A, rows_trac, layout.pomega1, Tp1)
+        _insert_block!(A, rows_trac, layout.pomega2, Tp2)
 
         for β in 1:N
-            w1 = model.mu1 .* (phase1.gamma .* phase1.normals[β])
+            w1 = model.mu1 .* (β1 .* phase1.gamma .* phase1.normals[β])
             D1 = spdiagm(0 => w1)
-            _insert_block!(A, rows, layout.uomega1[α], sparse(D1 * phase1.deriv_omega[α][β]))
-            _insert_block!(A, rows, layout.uomega1[β], sparse(D1 * phase1.deriv_omega[β][α]))
-            _insert_block!(A, rows, layout.ugamma[α], sparse(D1 * phase1.deriv_gamma[α][β]))
-            _insert_block!(A, rows, layout.ugamma[β], sparse(D1 * phase1.deriv_gamma[β][α]))
+            _insert_block!(A, rows_trac, layout.uomega1[α], sparse(D1 * phase1.deriv_omega[α][β]))
+            _insert_block!(A, rows_trac, layout.uomega1[β], sparse(D1 * phase1.deriv_omega[β][α]))
+            _insert_block!(A, rows_trac, layout.ugamma1[α], sparse(D1 * phase1.deriv_gamma[α][β]))
+            _insert_block!(A, rows_trac, layout.ugamma1[β], sparse(D1 * phase1.deriv_gamma[β][α]))
 
-            w2 = model.mu2 .* (phase2.gamma .* phase2.normals[β])
+            w2 = model.mu2 .* (β2 .* phase2.gamma .* phase2.normals[β])
             D2 = spdiagm(0 => w2)
-            _insert_block!(A, rows, layout.uomega2[α], sparse(D2 * phase2.deriv_omega[α][β]))
-            _insert_block!(A, rows, layout.uomega2[β], sparse(D2 * phase2.deriv_omega[β][α]))
-            _insert_block!(A, rows, layout.ugamma[α], sparse(D2 * phase2.deriv_gamma[α][β]))
-            _insert_block!(A, rows, layout.ugamma[β], sparse(D2 * phase2.deriv_gamma[β][α]))
+            _insert_block!(A, rows_trac, layout.uomega2[α], sparse(D2 * phase2.deriv_omega[α][β]))
+            _insert_block!(A, rows_trac, layout.uomega2[β], sparse(D2 * phase2.deriv_omega[β][α]))
+            _insert_block!(A, rows_trac, layout.ugamma2[α], sparse(D2 * phase2.deriv_gamma[α][β]))
+            _insert_block!(A, rows_trac, layout.ugamma2[β], sparse(D2 * phase2.deriv_gamma[β][α]))
         end
 
-        rhs = _interface_force_values(model, α, phase1.gamma, t)
-        _insert_vec!(b, rows, rhs)
+        _insert_vec!(b, rows_trac, rhs_trac)
+
+        _insert_block!(A, rows_jump, layout.ugamma1[α], spdiagm(0 => α1))
+        _insert_block!(A, rows_jump, layout.ugamma2[α], spdiagm(0 => -α2))
+        _insert_vec!(b, rows_jump, rhs_jump)
     end
 
     return A, b
@@ -2458,13 +2591,13 @@ function _assemble_core!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesM
 
     @inbounds for d in 1:N
         _insert_block!(A, layout.uomega1[d], layout.uomega1[d], phase1.visc_omega[d])
-        _insert_block!(A, layout.uomega1[d], layout.ugamma[d], phase1.visc_gamma[d])
+        _insert_block!(A, layout.uomega1[d], layout.ugamma1[d], phase1.visc_gamma[d])
         _insert_block!(A, layout.uomega1[d], layout.pomega1, phase1.grad[d])
         f1 = _force_values(model, 1, d, t)
         _insert_vec!(b, layout.uomega1[d], model.cap_u1[d].V * f1)
 
         _insert_block!(A, layout.uomega2[d], layout.uomega2[d], phase2.visc_omega[d])
-        _insert_block!(A, layout.uomega2[d], layout.ugamma[d], phase2.visc_gamma[d])
+        _insert_block!(A, layout.uomega2[d], layout.ugamma2[d], phase2.visc_gamma[d])
         _insert_block!(A, layout.uomega2[d], layout.pomega2, phase2.grad[d])
         f2 = _force_values(model, 2, d, t)
         _insert_vec!(b, layout.uomega2[d], model.cap_u2[d].V * f2)
@@ -2472,9 +2605,9 @@ function _assemble_core!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesM
 
     @inbounds for d in 1:N
         _insert_block!(A, layout.pomega1, layout.uomega1[d], phase1.div_omega[d])
-        _insert_block!(A, layout.pomega1, layout.ugamma[d], phase1.div_gamma[d])
+        _insert_block!(A, layout.pomega1, layout.ugamma1[d], phase1.div_gamma[d])
         _insert_block!(A, layout.pomega2, layout.uomega2[d], phase2.div_omega[d])
-        _insert_block!(A, layout.pomega2, layout.ugamma[d], phase2.div_gamma[d])
+        _insert_block!(A, layout.pomega2, layout.ugamma2[d], phase2.div_gamma[d])
     end
 
     _assemble_interface_traction_rows!(A, b, model, blocks, t)
@@ -2547,14 +2680,14 @@ function assemble_unsteady!(
         block11 = theta .* phase1.visc_omega[d] + spdiagm(0 => mdt1)
         block1g = theta .* phase1.visc_gamma[d]
         _insert_block!(A, layout.uomega1[d], layout.uomega1[d], block11)
-        _insert_block!(A, layout.uomega1[d], layout.ugamma[d], block1g)
+        _insert_block!(A, layout.uomega1[d], layout.ugamma1[d], block1g)
         _insert_block!(A, layout.uomega1[d], layout.pomega1, phase1.grad[d])
 
         u1_prev = Vector{T}(xfull_prev[layout.uomega1[d]])
-        ug_prev = Vector{T}(xfull_prev[layout.ugamma[d]])
+        ug1_prev = Vector{T}(xfull_prev[layout.ugamma1[d]])
         rhs1 = mdt1 .* u1_prev
         if theta != one(T)
-            rhs1 .-= (one(T) - theta) .* (phase1.visc_omega[d] * u1_prev + phase1.visc_gamma[d] * ug_prev)
+            rhs1 .-= (one(T) - theta) .* (phase1.visc_omega[d] * u1_prev + phase1.visc_gamma[d] * ug1_prev)
         end
         f1_prev = _force_values(model, 1, d, t)
         f1_next = _force_values(model, 1, d, t_next)
@@ -2566,13 +2699,14 @@ function assemble_unsteady!(
         block22 = theta .* phase2.visc_omega[d] + spdiagm(0 => mdt2)
         block2g = theta .* phase2.visc_gamma[d]
         _insert_block!(A, layout.uomega2[d], layout.uomega2[d], block22)
-        _insert_block!(A, layout.uomega2[d], layout.ugamma[d], block2g)
+        _insert_block!(A, layout.uomega2[d], layout.ugamma2[d], block2g)
         _insert_block!(A, layout.uomega2[d], layout.pomega2, phase2.grad[d])
 
         u2_prev = Vector{T}(xfull_prev[layout.uomega2[d]])
+        ug2_prev = Vector{T}(xfull_prev[layout.ugamma2[d]])
         rhs2 = mdt2 .* u2_prev
         if theta != one(T)
-            rhs2 .-= (one(T) - theta) .* (phase2.visc_omega[d] * u2_prev + phase2.visc_gamma[d] * ug_prev)
+            rhs2 .-= (one(T) - theta) .* (phase2.visc_omega[d] * u2_prev + phase2.visc_gamma[d] * ug2_prev)
         end
         f2_prev = _force_values(model, 2, d, t)
         f2_next = _force_values(model, 2, d, t_next)
@@ -2583,9 +2717,9 @@ function assemble_unsteady!(
 
     @inbounds for d in 1:N
         _insert_block!(A, layout.pomega1, layout.uomega1[d], phase1.div_omega[d])
-        _insert_block!(A, layout.pomega1, layout.ugamma[d], phase1.div_gamma[d])
+        _insert_block!(A, layout.pomega1, layout.ugamma1[d], phase1.div_gamma[d])
         _insert_block!(A, layout.pomega2, layout.uomega2[d], phase2.div_omega[d])
-        _insert_block!(A, layout.pomega2, layout.ugamma[d], phase2.div_gamma[d])
+        _insert_block!(A, layout.pomega2, layout.ugamma2[d], phase2.div_gamma[d])
     end
 
     _assemble_interface_traction_rows!(A, b, model, blocks, t_next)
@@ -2675,7 +2809,7 @@ function assemble_unsteady!(
         rhs .+= model.cap_u[d].V * ftheta
         _insert_vec!(b, layout.uomega[d], rhs)
 
-        cut_next = _cut_values(model.cap_u[d], model.bc_cut, t_next)
+        cut_next = _cut_values(model.cap_u[d], model.bc_cut[d], t_next)
         _insert_vec!(b, layout.ugamma[d], cut_next)
     end
 
@@ -2933,6 +3067,472 @@ function solve_unsteady_moving!(
     return sys
 end
 
+@inline function _is_zero_identity_row(
+    A::SparseMatrixCSC{T,Int},
+    b::AbstractVector{T},
+    row::Int;
+    atol::T=sqrt(eps(T)),
+) where {T}
+    idx, vals = findnz(A[row, :])
+    if length(idx) != 1
+        return false
+    end
+    return idx[1] == row &&
+        abs(vals[1] - one(T)) <= atol &&
+        abs(b[row]) <= atol
+end
+
+function _dynamic_row_mask(
+    A::SparseMatrixCSC{T,Int},
+    b::AbstractVector{T},
+    rows::UnitRange{Int},
+) where {T}
+    mask = BitVector(undef, length(rows))
+    @inbounds for (k, row) in enumerate(rows)
+        mask[k] = !_is_zero_identity_row(A, b, row)
+    end
+    return mask
+end
+
+function _gauge_candidate_rows(
+    A::SparseMatrixCSC{T,Int},
+    layout::StokesLayoutTwoPhase{N},
+) where {N,T}
+    rows = Int[]
+    pstart = first(layout.pomega1)
+    @inbounds for row in layout.pomega1
+        idx, _ = findnz(A[row, :])
+        isempty(idx) && continue
+        has_vel = false
+        has_p = false
+        for col in idx
+            if col < pstart
+                has_vel = true
+            else
+                has_p = true
+            end
+        end
+        (!has_vel && has_p) && push!(rows, row)
+    end
+    return rows
+end
+
+"""
+    build_static_circle_equilibrium_state(model; sigma, R, gauge=:mean, sys=nothing)
+
+Build an exact-candidate equilibrium state for fixed-interface two-phase static
+circle balance:
+- zero bulk and interface velocities
+- phase-wise constant pressures with `p_in - p_out = sigma / R`
+- gauge row satisfied on the assembled steady system.
+"""
+function build_static_circle_equilibrium_state(
+    model::StokesModelTwoPhase{N,T};
+    sigma::Real,
+    R::Real,
+    gauge::Symbol=:mean,
+    sys::Union{Nothing,LinearSystem{T}}=nothing,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    sys_local = if isnothing(sys)
+        tmp = LinearSystem(spzeros(T, nsys, nsys), zeros(T, nsys))
+        assemble_steady!(tmp, model, zero(T))
+        tmp
+    else
+        sys
+    end
+
+    A = sys_local.A
+    b = sys_local.b
+    layout = model.layout
+    dp = convert(T, sigma / R)
+
+    dyn_p1 = _dynamic_row_mask(A, b, layout.pomega1)
+    dyn_p2 = _dynamic_row_mask(A, b, layout.pomega2)
+
+    gauge === :mean || gauge === :pin ||
+        throw(ArgumentError("gauge must be :mean or :pin"))
+
+    # Start from a physically balanced pressure split for the two phases.
+    p1c = dp
+    p2c = zero(T)
+    if gauge === :pin
+        # For pin gauge on phase-1, an additional global shift is applied below
+        # to satisfy the pinned row exactly.
+        p1c = dp
+        p2c = zero(T)
+    end
+
+    xeq = zeros(T, nsys)
+    shift_cols = Int[]
+    @inbounds for i in 1:length(layout.pomega1)
+        if dyn_p1[i]
+            col = layout.pomega1[i]
+            xeq[col] = p1c
+            push!(shift_cols, col)
+        end
+        if dyn_p2[i]
+            col = layout.pomega2[i]
+            xeq[col] = p2c
+            push!(shift_cols, col)
+        end
+    end
+
+    # Enforce gauge rows exactly by shifting both phase constants together.
+    gauge_rows = _gauge_candidate_rows(A, layout)
+    atol = sqrt(eps(T))
+    @inbounds for row in gauge_rows
+        isempty(shift_cols) && break
+        denom = zero(T)
+        for col in shift_cols
+            denom += A[row, col]
+        end
+        abs(denom) <= atol && continue
+
+        idx, vals = findnz(A[row, :])
+        rrow = -b[row]
+        for k in eachindex(idx)
+            rrow += vals[k] * xeq[idx[k]]
+        end
+        s = rrow / denom
+        for col in shift_cols
+            xeq[col] -= s
+        end
+    end
+
+    return xeq
+end
+
+function _assemble_two_phase_stages(
+    model::StokesModelTwoPhase{N,T},
+    t::T,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    blocks = _stokes_blocks(model)
+    A = spzeros(T, nsys, nsys)
+    b = zeros(T, nsys)
+    stages = Dict{Symbol,Tuple{SparseMatrixCSC{T,Int},Vector{T}}}()
+
+    _assemble_core!(A, b, model, blocks, t)
+    stages[:core] = (copy(A), copy(b))
+
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t)
+    stages[:traction_bc] = (copy(A), copy(b))
+
+    _apply_symmetry_box_bc!(A, b, model, t, traction_locked_rows)
+    stages[:symmetry_bc] = (copy(A), copy(b))
+
+    _apply_velocity_box_bc!(A, b, model, t; locked_rows=traction_locked_rows)
+    stages[:velocity_bc] = (copy(A), copy(b))
+
+    _apply_pressure_box_bc!(A, b, model, t)
+    stages[:pressure_bc] = (copy(A), copy(b))
+
+    _apply_pressure_gauge!(A, b, model)
+    stages[:gauge] = (copy(A), copy(b))
+
+    active_rows = _stokes_row_activity(model, A)
+    A, b = _apply_row_identity_constraints!(A, b, active_rows)
+    stages[:row_identity] = (A, b)
+    return stages, active_rows
+end
+
+"""
+    exact_equilibrium_residual(sys, model, xeq; t=0)
+
+Return exact-candidate defect diagnostics `A*xeq - b` on the assembled system.
+Also returns residuals for intermediate assembly stages and stage increments.
+"""
+function exact_equilibrium_residual(
+    sys::LinearSystem{T},
+    model::StokesModelTwoPhase{N,T},
+    xeq::AbstractVector{T};
+    t::T=zero(T),
+) where {N,T}
+    length(xeq) == nunknowns(model.layout) ||
+        throw(DimensionMismatch("xeq length must match system unknown count"))
+
+    r = sys.A * xeq - sys.b
+    stages, active_rows = _assemble_two_phase_stages(model, t)
+
+    stage_residuals = Dict{Symbol,Vector{T}}()
+    for (name, (A, b)) in stages
+        stage_residuals[name] = A * xeq - b
+    end
+
+    order = (:core, :traction_bc, :symmetry_bc, :velocity_bc, :pressure_bc, :gauge, :row_identity)
+    incr = Dict{Symbol,Vector{T}}()
+    prev = zeros(T, length(r))
+    for name in order
+        curr = stage_residuals[name]
+        incr[name] = curr .- prev
+        prev = curr
+    end
+
+    return (
+        residual=r,
+        stage_residuals=stage_residuals,
+        incremental_residuals=incr,
+        active_rows=active_rows,
+    )
+end
+
+function _row_coords_for_block(
+    model::StokesModelTwoPhase{N,T},
+    block::Symbol,
+    local_i::Int,
+) where {N,T}
+    if block === :uomega1_x
+        return model.cap_u1[1].C_ω[local_i]
+    elseif block === :uomega1_y
+        return model.cap_u1[2].C_ω[local_i]
+    elseif block === :uomega2_x
+        return model.cap_u2[1].C_ω[local_i]
+    elseif block === :uomega2_y
+        return model.cap_u2[2].C_ω[local_i]
+    elseif block === :ugamma1_x || block === :ugamma1_y || block === :ugamma2_x || block === :ugamma2_y
+        return model.cap_p1.C_γ[local_i]
+    elseif block === :pomega1
+        return model.cap_p1.C_ω[local_i]
+    elseif block === :pomega2
+        return model.cap_p2.C_ω[local_i]
+    end
+    return nothing
+end
+
+"""
+    block_residual_report(sys, model, r; topk=10, io=stdout)
+
+Report block-wise residual norms and worst rows for a two-phase static audit.
+"""
+function block_residual_report(
+    sys::LinearSystem{T},
+    model::StokesModelTwoPhase{N,T},
+    r::AbstractVector{T};
+    topk::Int=10,
+    io::IO=stdout,
+) where {N,T}
+    layout = model.layout
+    blocks = (
+        (:uomega1_x, layout.uomega1[1]),
+        (:uomega1_y, layout.uomega1[2]),
+        (:uomega2_x, layout.uomega2[1]),
+        (:uomega2_y, layout.uomega2[2]),
+        (:ugamma1_x, layout.ugamma1[1]),
+        (:ugamma1_y, layout.ugamma1[2]),
+        (:ugamma2_x, layout.ugamma2[1]),
+        (:ugamma2_y, layout.ugamma2[2]),
+        (:pomega1, layout.pomega1),
+        (:pomega2, layout.pomega2),
+    )
+
+    summary = Dict{Symbol,NamedTuple}()
+    println(io, "Block residual report:")
+    for (name, rows) in blocks
+        rv = @view r[rows]
+        maxabs = maximum(abs, rv)
+        l2 = norm(rv)
+        active_count = 0
+        @inbounds for row in rows
+            active_count += !_is_zero_identity_row(sys.A, sys.b, row)
+        end
+        println(io, "  ", name, ": maxabs=", maxabs, ", l2=", l2, ", active_rows=", active_count, "/", length(rows))
+
+        order = sortperm(abs.(rv); rev=true)
+        nshow = min(topk, length(order))
+        shown = 0
+        @inbounds for k in 1:nshow
+            local_i = order[k]
+            val = rv[local_i]
+            abs(val) == zero(T) && continue
+            row = rows[local_i]
+            x = _row_coords_for_block(model, name, local_i)
+            println(io, "    row=", row, " local=", local_i, " resid=", val, " x=", x)
+            shown += 1
+        end
+        shown == 0 && println(io, "    top rows are zero.")
+
+        summary[name] = (maxabs=maxabs, l2=l2, active_rows=active_count, total_rows=length(rows))
+    end
+    return summary
+end
+
+@inline function _mean_values(vals::AbstractVector{T}, idx::Vector{Int}) where {T}
+    isempty(idx) && return zero(T)
+    s = zero(T)
+    @inbounds for i in idx
+        s += vals[i]
+    end
+    return s / convert(T, length(idx))
+end
+
+@inline function _std_values(vals::AbstractVector{T}, idx::Vector{Int}) where {T}
+    n = length(idx)
+    n <= 1 && return zero(T)
+    μ = _mean_values(vals, idx)
+    s2 = zero(T)
+    @inbounds for i in idx
+        d = vals[i] - μ
+        s2 += d * d
+    end
+    return sqrt(s2 / convert(T, n - 1))
+end
+
+@inline function _weighted_mean(vals::AbstractVector{T}, idx::Vector{Int}, w::AbstractVector{T}) where {T}
+    isempty(idx) && return zero(T)
+    s = zero(T)
+    ws = zero(T)
+    @inbounds for i in idx
+        wi = w[i]
+        vi = vals[i]
+        s += wi * vi
+        ws += wi
+    end
+    return ws > zero(T) ? s / ws : _mean_values(vals, idx)
+end
+
+function _phase_pressure_stats(
+    p::AbstractVector{T},
+    cap::AssembledCapacity{N,T},
+) where {N,T}
+    idx_all = findall(_pressure_activity(cap))
+    idx_cut = Int[]
+    idx_full = Int[]
+    @inbounds for i in idx_all
+        Γi = cap.buf.Γ[i]
+        if isfinite(Γi) && Γi > zero(T)
+            push!(idx_cut, i)
+        else
+            push!(idx_full, i)
+        end
+    end
+
+    V = cap.buf.V
+    stats = Dict{Symbol,NamedTuple}()
+    for (tag, idx) in ((:all, idx_all), (:full, idx_full), (:cut, idx_cut))
+        if isempty(idx)
+            stats[tag] = (count=0, mean=zero(T), mean_weighted=zero(T), std=zero(T), min=zero(T), max=zero(T))
+            continue
+        end
+        μ = _mean_values(p, idx)
+        σ = _std_values(p, idx)
+        pmin = p[idx[1]]
+        pmax = p[idx[1]]
+        @inbounds for i in idx
+            v = p[i]
+            v < pmin && (pmin = v)
+            v > pmax && (pmax = v)
+        end
+        stats[tag] = (
+            count=length(idx),
+            mean=μ,
+            mean_weighted=_weighted_mean(p, idx, V),
+            std=σ,
+            min=pmin,
+            max=pmax,
+        )
+    end
+    return stats
+end
+
+"""
+    pressure_flatness_report(model, sys; io=stdout, verbose=false)
+
+Return phase-wise pressure flatness diagnostics on active pressure cells, with
+all/full/cut splits and simple/volume-weighted jump estimates.
+"""
+function pressure_flatness_report(
+    model::StokesModelTwoPhase{N,T},
+    sys::LinearSystem{T};
+    io::IO=stdout,
+    verbose::Bool=false,
+) where {N,T}
+    p1 = sys.x[model.layout.pomega1]
+    p2 = sys.x[model.layout.pomega2]
+    s1 = _phase_pressure_stats(p1, model.cap_p1)
+    s2 = _phase_pressure_stats(p2, model.cap_p2)
+
+    jump = Dict{Symbol,NamedTuple}()
+    for tag in (:all, :full, :cut)
+        jump[tag] = (
+            simple=s1[tag].mean - s2[tag].mean,
+            weighted=s1[tag].mean_weighted - s2[tag].mean_weighted,
+        )
+    end
+
+    if verbose
+        println(io, "Pressure flatness report:")
+        for tag in (:all, :full, :cut)
+            println(io, "  ", tag, ": p1(mean,std,min,max)=(", s1[tag].mean, ", ", s1[tag].std, ", ", s1[tag].min, ", ", s1[tag].max, ")",
+                ", p2(mean,std,min,max)=(", s2[tag].mean, ", ", s2[tag].std, ", ", s2[tag].min, ", ", s2[tag].max, ")",
+                ", jump(simple,weighted)=(", jump[tag].simple, ", ", jump[tag].weighted, ")")
+        end
+    end
+
+    return (phase1=s1, phase2=s2, jump=jump)
+end
+
+"""
+    local_capillary_balance_report(model, sigma, R; center=SVector(0,0), topk=20, io=stdout)
+
+Local interface force-balance audit on active interface-support cells.
+"""
+function local_capillary_balance_report(
+    model::StokesModelTwoPhase{N,T},
+    sigma::Real,
+    R::Real;
+    center::SVector{N,<:Real}=SVector{N,Float64}(ntuple(_ -> 0.0, N)),
+    t::T=zero(T),
+    topk::Int=20,
+    io::IO=stdout,
+) where {N,T}
+    dp = convert(T, sigma / R)
+    xc = SVector{N,T}(ntuple(d -> convert(T, center[d]), N))
+    iface = findall(isfinite.(model.cap_p1.buf.Γ) .& (model.cap_p1.buf.Γ .> zero(T)))
+
+    rows = Vector{NamedTuple}(undef, length(iface))
+    @inbounds for (k, i) in enumerate(iface)
+        Γi = model.cap_p1.buf.Γ[i]
+        xγ = model.cap_p1.C_γ[i]
+        nbar = model.cap_p1.n_γ[i]
+        fraw = _interface_force_vector(model.interface_force, xγ, t)
+        fdisc = SVector{N,T}(ntuple(d -> _consistent_interface_force_component(fraw, nbar, d), N))
+
+        dx = xγ - xc
+        rr = norm(dx)
+        ncir = rr > zero(T) ? dx / rr : SVector{N,T}(ntuple(_ -> zero(T), N))
+
+        Fraw = Γi .* fraw
+        Fdisc = Γi .* fdisc
+        Fpress = -Γi * dp .* nbar
+        rows[k] = (
+            i=i,
+            gamma=Γi,
+            xgamma=xγ,
+            n_discrete=nbar,
+            n_circle=ncir,
+            n_mismatch=nbar - ncir,
+            force_raw=Fraw,
+            force_discrete=Fdisc,
+            force_pressure=Fpress,
+            force_mismatch_raw=Fraw - Fpress,
+            force_mismatch_discrete=Fdisc - Fpress,
+        )
+    end
+
+    order = sortperm(rows; by=r -> norm(r.force_mismatch_raw), rev=true)
+    println(io, "Local capillary balance report:")
+    println(io, "  interface cells=", length(rows), ", dp_th=", dp)
+    for k in 1:min(topk, length(order))
+        r = rows[order[k]]
+        println(io, "  i=", r.i, " Γ=", r.gamma, " xγ=", r.xgamma,
+            " nΔ=", r.n_mismatch,
+            " Fraw-Fp=", r.force_mismatch_raw,
+            " Fdisc-Fp=", r.force_mismatch_discrete)
+    end
+    return rows
+end
+
 @inline function _zero_svector(::Type{T}, ::Val{N}) where {T,N}
     return SVector{N,T}(ntuple(_ -> zero(T), N))
 end
@@ -3000,6 +3600,21 @@ function _pressure_trace(
     throw(ArgumentError("unknown pressure reconstruction `$reconstruction`; expected :none or :linear"))
 end
 
+function _pressure_gradient_reconstruction(
+    model::StokesModelMono{N,T},
+    pω::AbstractVector{T},
+    reconstruction::Symbol,
+) where {N,T}
+    nt = model.cap_p.ntotal
+    pγ_seed = zeros(T, nt)
+    if reconstruction === :linear
+        pγ_seed .= pω
+    elseif reconstruction !== :none
+        throw(ArgumentError("unknown pressure reconstruction `$reconstruction`; expected :none or :linear"))
+    end
+    return _scalar_gradient(model.op_p, pω, pγ_seed)
+end
+
 @inline function _stress_tensor(
     μ::T,
     G::SMatrix{N,N,T},
@@ -3049,13 +3664,7 @@ function embedded_boundary_quantities(
     pω = Vector{T}(x[layout.pomega])
 
     grad_u = ntuple(d -> _scalar_gradient(model.op_u[d], uω[d], uγ[d]), N)
-    pγ_seed = zeros(T, nt)
-    if pressure_reconstruction === :linear
-        pγ_seed .= pω
-    elseif pressure_reconstruction !== :none
-        throw(ArgumentError("unknown pressure reconstruction `$pressure_reconstruction`; expected :none or :linear"))
-    end
-    grad_p = _scalar_gradient(model.op_p, pω, pγ_seed)
+    grad_p = _pressure_gradient_reconstruction(model, pω, pressure_reconstruction)
 
     zero_vec = _zero_svector(T, Val(N))
     zero_sig = zero(SMatrix{N,N,T,N * N})
@@ -3137,6 +3746,88 @@ function embedded_boundary_quantities(
 end
 
 """
+    embedded_boundary_pressure(model, x; pressure_reconstruction=:linear)
+    embedded_boundary_pressure(model, sys; pressure_reconstruction=:linear)
+
+Reconstruct pressure traces on embedded-boundary pressure cells for
+`StokesModelMono`.
+
+The pressure unknown is the bulk/cell pressure `pω`, and interface pressure is
+reconstructed at the embedded-interface centroid `C_γ`:
+- `:none`: `pγ = pω[i]`
+- `:linear`: `pγ = pω[i] + ∇p[i] ⋅ (C_γ[i] - C_ω[i])`
+
+Returns a named tuple with:
+- `pressure`: reconstructed `pγ` on pressure cells (`NaN` away from interface)
+- `interface_indices`: active embedded-interface pressure-cell indices
+- `centers`: interface centroids `C_γ` on active indices
+- `normals`: interface normals `n_γ` on active indices
+- `measure`: interface measure `Γ` on active indices
+- `force_density`: pressure-force contributions `(-pγ*n_γ)*Γ` on pressure cells
+- `force`: integrated pressure force
+"""
+function embedded_boundary_pressure(
+    model::StokesModelMono{N,T},
+    x::AbstractVector;
+    pressure_reconstruction::Symbol=:linear,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
+    nt = model.cap_p.ntotal
+
+    pω = Vector{T}(x[model.layout.pomega])
+    grad_p = _pressure_gradient_reconstruction(model, pω, pressure_reconstruction)
+
+    pressure = fill(T(NaN), nt)
+    zero_vec = _zero_svector(T, Val(N))
+    force_density = fill(zero_vec, nt)
+    interface_indices = Int[]
+    centers = SVector{N,T}[]
+    normals = SVector{N,T}[]
+    measure = T[]
+
+    Fp = zeros(T, N)
+
+    cap = model.cap_p
+    @inbounds for i in 1:cap.ntotal
+        _is_interface_index(cap, i) || continue
+        push!(interface_indices, i)
+
+        Γi = cap.buf.Γ[i]
+        nγi = cap.n_γ[i]
+        xγi = cap.C_γ[i]
+        pγi = _pressure_trace(model, pω, grad_p, i, xγi, pressure_reconstruction)
+        fpvec = Γi .* (-pγi .* nγi)
+
+        pressure[i] = pγi
+        force_density[i] = fpvec
+        Fp .+= fpvec
+
+        push!(centers, xγi)
+        push!(normals, nγi)
+        push!(measure, Γi)
+    end
+
+    return (
+        pressure=pressure,
+        interface_indices=interface_indices,
+        centers=centers,
+        normals=normals,
+        measure=measure,
+        force_density=force_density,
+        force=SVector{N,T}(Tuple(Fp)),
+    )
+end
+
+function embedded_boundary_pressure(
+    model::StokesModelMono{N,T},
+    sys::LinearSystem{T};
+    pressure_reconstruction::Symbol=:linear,
+) where {N,T}
+    return embedded_boundary_pressure(model, sys.x; pressure_reconstruction=pressure_reconstruction)
+end
+
+"""
     embedded_boundary_traction(model, x; kwargs...)
 
 Return pressure-grid traction vectors on embedded boundary cells.
@@ -3186,7 +3877,8 @@ Key keywords:
 - `force`: body force (constant tuple/scalar or callback)
 - `bc_u`: per-component outer velocity BCs
 - `bc_p`: optional pressure BCs on box walls
-- `bc_cut`: cut-boundary velocity BC (currently `Dirichlet` only)
+- `bc_cut`: cut-boundary velocity BC (single boundary or per-component tuple;
+  currently `Dirichlet` values are supported for cut rows)
 - `gauge`: pressure gauge (`PinPressureGauge` or `MeanPressureGauge`)
 - `strong_wall_bc`: enable strong elimination for collocated Dirichlet wall rows
 """
@@ -3200,7 +3892,7 @@ function StokesModelMono(
     force=_default_force(T, Val(N)),
     bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
     bc_p::Union{Nothing,BorderConditions}=nothing,
-    bc_cut::AbstractBoundary=Dirichlet(zero(T)),
+    bc_cut::Union{AbstractBoundary,NTuple{N,AbstractBoundary}}=ntuple(_ -> Dirichlet(zero(T)), N),
     gauge::AbstractPressureGauge=PinPressureGauge(),
     strong_wall_bc::Bool=true,
     geom_method::Symbol=:prebuilt,
@@ -3228,6 +3920,7 @@ function StokesModelMono(
     ), N)
 
     layout = StokesLayout(nt, Val(N))
+    bc_cut_tuple = bc_cut isa NTuple ? bc_cut : _normalize_cut_bc_tuple(bc_cut, Val(N))
     return StokesModelMono{N,T,typeof(force),typeof(body)}(
         gridp,
         gridu,
@@ -3240,7 +3933,7 @@ function StokesModelMono(
         force,
         bc_u,
         bc_p,
-        bc_cut,
+        bc_cut_tuple,
         gauge,
         strong_wall_bc,
         layout,
@@ -3258,7 +3951,7 @@ function StokesModelMono(
     force=_default_force(T, Val(N)),
     bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
     bc_p::Union{Nothing,BorderConditions}=nothing,
-    bc_cut::AbstractBoundary=Dirichlet(zero(T)),
+    bc_cut::Union{AbstractBoundary,NTuple{N,AbstractBoundary}}=ntuple(_ -> Dirichlet(zero(T)), N),
     gauge::AbstractPressureGauge=PinPressureGauge(),
     strong_wall_bc::Bool=true,
     geom_method::Symbol=:vofijul,
@@ -3283,6 +3976,7 @@ function StokesModelMono(
     end
 
     layout = StokesLayout(nt, Val(N))
+    bc_cut_tuple = bc_cut isa NTuple ? bc_cut : _normalize_cut_bc_tuple(bc_cut, Val(N))
 
     return StokesModelMono{N,T,typeof(force),typeof(body)}(
         gridp,
@@ -3296,7 +3990,7 @@ function StokesModelMono(
         force,
         bc_u,
         bc_p,
-        bc_cut,
+        bc_cut_tuple,
         gauge,
         strong_wall_bc,
         layout,
@@ -3394,13 +4088,15 @@ end
     StokesModelTwoPhase(gridp, body, mu1, mu2; kwargs...)
     StokesModelTwoPhase(cap_p1, op_p1, cap_u1, op_u1, cap_p2, op_p2, cap_u2, op_u2, mu1, mu2, rho1, rho2; kwargs...)
 
-Construct a fixed-interface two-phase Stokes model with shared interface velocity
+Construct a fixed-interface two-phase Stokes model with phase-wise interface
 trace unknowns and phase-wise pressure blocks.
 
 Key keywords:
 - `rho1`, `rho2`: phase densities (for unsteady terms)
 - `force1`, `force2`: phase body forces
-- `interface_force`: interface traction forcing callback/value
+- `interface_jump`: interface velocity jump forcing callback/value for `[u] = f`
+- `interface_force`: interface traction-jump forcing callback/value for `[traction] = g`
+- `bc_interface`: optional per-component `InterfaceConditions` (`ScalarJump`/`FluxJump`)
 - `bc_u`, `bc_p`, `gauge`, `strong_wall_bc`: box BC and gauge controls
 """
 function StokesModelTwoPhase(
@@ -3418,7 +4114,9 @@ function StokesModelTwoPhase(
     rho2::Real;
     force1=_default_force(T, Val(N)),
     force2=_default_force(T, Val(N)),
+    interface_jump=_default_interface_jump(T, Val(N)),
     interface_force=_default_interface_force(T, Val(N)),
+    bc_interface::Union{Nothing,InterfaceConditions,NTuple{N,InterfaceConditions}}=nothing,
     bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
     bc_p::Union{Nothing,BorderConditions}=nothing,
     gauge::AbstractPressureGauge=PinPressureGauge(),
@@ -3437,6 +4135,8 @@ function StokesModelTwoPhase(
     pflags = _periodic_velocity_flags(bc_u)
     bc_p = _validate_pressure_bc(bc_p, pflags)
     _validate_stokes_box_bcs!(bc_u, bc_p, pflags, T)
+    bc_interface_tuple = _normalize_interface_bc(bc_interface, Val(N))
+    _validate_stokes_interface_bcs!(bc_interface_tuple)
 
     check_interface && _check_two_phase_interface_consistency(cap_p1, cap_p2)
 
@@ -3453,7 +4153,7 @@ function StokesModelTwoPhase(
 
     layout = StokesLayoutTwoPhase(nt, Val(N))
     return StokesModelTwoPhase{
-        N,T,typeof(force1),typeof(force2),typeof(interface_force),typeof(body)
+        N,T,typeof(force1),typeof(force2),typeof(interface_force),typeof(interface_jump),typeof(body)
     }(
         gridp,
         gridu,
@@ -3472,6 +4172,8 @@ function StokesModelTwoPhase(
         force1,
         force2,
         interface_force,
+        interface_jump,
+        bc_interface_tuple,
         bc_u,
         bc_p,
         gauge,
@@ -3492,7 +4194,9 @@ function StokesModelTwoPhase(
     rho2::Real=one(T),
     force1=_default_force(T, Val(N)),
     force2=_default_force(T, Val(N)),
+    interface_jump=_default_interface_jump(T, Val(N)),
     interface_force=_default_interface_force(T, Val(N)),
+    bc_interface::Union{Nothing,InterfaceConditions,NTuple{N,InterfaceConditions}}=nothing,
     bc_u::NTuple{N,BorderConditions}=ntuple(_ -> BorderConditions(), N),
     bc_p::Union{Nothing,BorderConditions}=nothing,
     gauge::AbstractPressureGauge=PinPressureGauge(),
@@ -3537,7 +4241,9 @@ function StokesModelTwoPhase(
         rho2;
         force1=force1,
         force2=force2,
+        interface_jump=interface_jump,
         interface_force=interface_force,
+        bc_interface=bc_interface,
         bc_u=bc_u,
         bc_p=bc_p,
         gauge=gauge,
