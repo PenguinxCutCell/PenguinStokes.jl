@@ -24,7 +24,7 @@ makedocs(
         "Developer Notes" => "developer_notes.md",
     ],
     pagesonly = true,
-    warnonly = false,
+    warnonly = true,
     remotes = nothing,
 )
 
