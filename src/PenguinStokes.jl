@@ -567,6 +567,76 @@ function _interface_force_component(interface_force, d::Int, x::SVector{N,T}, t:
     throw(ArgumentError("unsupported interface forcing type $(typeof(interface_force))"))
 end
 
+@inline function _as_interface_force_vector(y, ::Val{N}, ::Type{T}) where {N,T}
+    if y isa Number
+        vy = convert(T, y)
+        return SVector{N,T}(ntuple(_ -> vy, N))
+    elseif y isa Tuple || y isa AbstractVector
+        length(y) == N ||
+            throw(ArgumentError("interface forcing callback must return scalar or length-$N vector"))
+        return SVector{N,T}(ntuple(d -> convert(T, y[d]), N))
+    end
+    throw(ArgumentError("interface forcing callback must return scalar or length-$N vector"))
+end
+
+function _interface_force_vector(interface_force, x::SVector{N,T}, t::T) where {N,T}
+    if interface_force isa Number
+        fv = convert(T, interface_force)
+        return SVector{N,T}(ntuple(_ -> fv, N))
+    elseif interface_force isa NTuple{N,Any}
+        return SVector{N,T}(ntuple(d -> begin
+            fd = interface_force[d]
+            if fd isa Number
+                return convert(T, fd)
+            elseif fd isa Function
+                if applicable(fd, x..., t)
+                    return convert(T, fd(x..., t))
+                elseif applicable(fd, x...)
+                    return convert(T, fd(x...))
+                elseif applicable(fd, x, t)
+                    return convert(T, fd(x, t))
+                elseif applicable(fd, x)
+                    return convert(T, fd(x))
+                end
+                throw(ArgumentError("interface forcing callback for component $d must accept (x...), (x..., t), (x), or (x, t)"))
+            end
+            throw(ArgumentError("unsupported interface forcing entry type $(typeof(fd)) for component $d"))
+        end, N))
+    elseif interface_force isa Function
+        if applicable(interface_force, x..., t)
+            return _as_interface_force_vector(interface_force(x..., t), Val(N), T)
+        elseif applicable(interface_force, x...)
+            return _as_interface_force_vector(interface_force(x...), Val(N), T)
+        elseif applicable(interface_force, x, t)
+            return _as_interface_force_vector(interface_force(x, t), Val(N), T)
+        elseif applicable(interface_force, x)
+            return _as_interface_force_vector(interface_force(x), Val(N), T)
+        end
+        throw(ArgumentError("interface forcing callback must accept (x...), (x..., t), (x), or (x, t)"))
+    end
+    throw(ArgumentError("unsupported interface forcing type $(typeof(interface_force))"))
+end
+
+@inline function _consistent_interface_force_component(
+    fγ::SVector{N,T},
+    nγ::SVector{N,T},
+    d::Int,
+) where {N,T}
+    fnorm = norm(fγ)
+    nnorm = norm(nγ)
+    if fnorm > zero(T) && nnorm > zero(T)
+        c = dot(fγ, nγ) / (fnorm * nnorm)
+        # When the prescribed traction is (nearly) normal, use the same
+        # discrete normal moments as the pressure coupling to preserve exact
+        # local force balance for constant jump states.
+        if abs(abs(c) - one(T)) <= convert(T, 1e-6)
+            s = c >= zero(T) ? one(T) : -one(T)
+            return s * fnorm * nγ[d]
+        end
+    end
+    return fγ[d]
+end
+
 function _cut_values(cap::AssembledCapacity{N,T}, bc_cut::AbstractBoundary, t::T) where {N,T}
     out = zeros(T, cap.ntotal)
     if bc_cut isa Dirichlet
@@ -756,32 +826,6 @@ function _stokes_row_activity(model::StokesModelTwoPhase{N,T}, A::SparseMatrixCS
 
     p1active = _pressure_activity(model.cap_p1)
     p2active = _pressure_activity(model.cap_p2)
-    u1support = ntuple(d -> _cell_activity_masks(model.cap_u1[d])[1], N)
-    u2support = ntuple(d -> _cell_activity_masks(model.cap_u2[d])[1], N)
-
-    @inbounds for i in 1:model.cap_p1.ntotal
-        p1active[i] || continue
-        supported = false
-        for d in 1:N
-            if u1support[d][i]
-                supported = true
-                break
-            end
-        end
-        p1active[i] = supported
-    end
-
-    @inbounds for i in 1:model.cap_p2.ntotal
-        p2active[i] || continue
-        supported = false
-        for d in 1:N
-            if u2support[d][i]
-                supported = true
-                break
-            end
-        end
-        p2active[i] = supported
-    end
 
     p1first = first(layout.pomega1)
     p1last = last(layout.pomega1)
@@ -2444,6 +2488,7 @@ function _interface_condition_values(
     model::StokesModelTwoPhase{N,T},
     d::Int,
     gamma::AbstractVector{T},
+    normals::NTuple{N,AbstractVector{T}},
     t::T,
 ) where {N,T}
     nt = length(gamma)
@@ -2479,7 +2524,9 @@ function _interface_condition_values(
             rhs_jump[i] = convert(T, eval_bc(sb.value, xi, t))
         end
         if fbc === nothing
-            rhs_trac[i] = Γi * _interface_force_component(model.interface_force, d, xi, t)
+            fγ = _interface_force_vector(model.interface_force, xi, t)
+            nγ = SVector{N,T}(ntuple(k -> normals[k][i], N))
+            rhs_trac[i] = Γi * _consistent_interface_force_component(fγ, nγ, d)
         else
             fb = fbc::FluxJump
             β1[i] = convert(T, eval_bc(fb.β₁, xi, t))
@@ -2504,7 +2551,7 @@ function _assemble_interface_traction_rows!(
     @inbounds for α in 1:N
         rows_trac = layout.ugamma1[α]
         rows_jump = layout.ugamma2[α]
-        α1, α2, β1, β2, rhs_jump, rhs_trac = _interface_condition_values(model, α, phase1.gamma, t)
+        α1, α2, β1, β2, rhs_jump, rhs_trac = _interface_condition_values(model, α, phase1.gamma, phase1.normals, t)
 
         Tp1 = spdiagm(0 => -(β1 .* phase1.gamma .* phase1.normals[α]))
         Tp2 = spdiagm(0 => -(β2 .* phase2.gamma .* phase2.normals[α]))
@@ -3018,6 +3065,472 @@ function solve_unsteady_moving!(
     assemble_unsteady_moving!(sys, model, x_prev, t, dt; scheme=scheme)
     solve!(sys; method=method, kwargs...)
     return sys
+end
+
+@inline function _is_zero_identity_row(
+    A::SparseMatrixCSC{T,Int},
+    b::AbstractVector{T},
+    row::Int;
+    atol::T=sqrt(eps(T)),
+) where {T}
+    idx, vals = findnz(A[row, :])
+    if length(idx) != 1
+        return false
+    end
+    return idx[1] == row &&
+        abs(vals[1] - one(T)) <= atol &&
+        abs(b[row]) <= atol
+end
+
+function _dynamic_row_mask(
+    A::SparseMatrixCSC{T,Int},
+    b::AbstractVector{T},
+    rows::UnitRange{Int},
+) where {T}
+    mask = BitVector(undef, length(rows))
+    @inbounds for (k, row) in enumerate(rows)
+        mask[k] = !_is_zero_identity_row(A, b, row)
+    end
+    return mask
+end
+
+function _gauge_candidate_rows(
+    A::SparseMatrixCSC{T,Int},
+    layout::StokesLayoutTwoPhase{N},
+) where {N,T}
+    rows = Int[]
+    pstart = first(layout.pomega1)
+    @inbounds for row in layout.pomega1
+        idx, _ = findnz(A[row, :])
+        isempty(idx) && continue
+        has_vel = false
+        has_p = false
+        for col in idx
+            if col < pstart
+                has_vel = true
+            else
+                has_p = true
+            end
+        end
+        (!has_vel && has_p) && push!(rows, row)
+    end
+    return rows
+end
+
+"""
+    build_static_circle_equilibrium_state(model; sigma, R, gauge=:mean, sys=nothing)
+
+Build an exact-candidate equilibrium state for fixed-interface two-phase static
+circle balance:
+- zero bulk and interface velocities
+- phase-wise constant pressures with `p_in - p_out = sigma / R`
+- gauge row satisfied on the assembled steady system.
+"""
+function build_static_circle_equilibrium_state(
+    model::StokesModelTwoPhase{N,T};
+    sigma::Real,
+    R::Real,
+    gauge::Symbol=:mean,
+    sys::Union{Nothing,LinearSystem{T}}=nothing,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    sys_local = if isnothing(sys)
+        tmp = LinearSystem(spzeros(T, nsys, nsys), zeros(T, nsys))
+        assemble_steady!(tmp, model, zero(T))
+        tmp
+    else
+        sys
+    end
+
+    A = sys_local.A
+    b = sys_local.b
+    layout = model.layout
+    dp = convert(T, sigma / R)
+
+    dyn_p1 = _dynamic_row_mask(A, b, layout.pomega1)
+    dyn_p2 = _dynamic_row_mask(A, b, layout.pomega2)
+
+    gauge === :mean || gauge === :pin ||
+        throw(ArgumentError("gauge must be :mean or :pin"))
+
+    # Start from a physically balanced pressure split for the two phases.
+    p1c = dp
+    p2c = zero(T)
+    if gauge === :pin
+        # For pin gauge on phase-1, an additional global shift is applied below
+        # to satisfy the pinned row exactly.
+        p1c = dp
+        p2c = zero(T)
+    end
+
+    xeq = zeros(T, nsys)
+    shift_cols = Int[]
+    @inbounds for i in 1:length(layout.pomega1)
+        if dyn_p1[i]
+            col = layout.pomega1[i]
+            xeq[col] = p1c
+            push!(shift_cols, col)
+        end
+        if dyn_p2[i]
+            col = layout.pomega2[i]
+            xeq[col] = p2c
+            push!(shift_cols, col)
+        end
+    end
+
+    # Enforce gauge rows exactly by shifting both phase constants together.
+    gauge_rows = _gauge_candidate_rows(A, layout)
+    atol = sqrt(eps(T))
+    @inbounds for row in gauge_rows
+        isempty(shift_cols) && break
+        denom = zero(T)
+        for col in shift_cols
+            denom += A[row, col]
+        end
+        abs(denom) <= atol && continue
+
+        idx, vals = findnz(A[row, :])
+        rrow = -b[row]
+        for k in eachindex(idx)
+            rrow += vals[k] * xeq[idx[k]]
+        end
+        s = rrow / denom
+        for col in shift_cols
+            xeq[col] -= s
+        end
+    end
+
+    return xeq
+end
+
+function _assemble_two_phase_stages(
+    model::StokesModelTwoPhase{N,T},
+    t::T,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    blocks = _stokes_blocks(model)
+    A = spzeros(T, nsys, nsys)
+    b = zeros(T, nsys)
+    stages = Dict{Symbol,Tuple{SparseMatrixCSC{T,Int},Vector{T}}}()
+
+    _assemble_core!(A, b, model, blocks, t)
+    stages[:core] = (copy(A), copy(b))
+
+    traction_locked_rows = _apply_traction_box_bc!(A, b, model, t)
+    stages[:traction_bc] = (copy(A), copy(b))
+
+    _apply_symmetry_box_bc!(A, b, model, t, traction_locked_rows)
+    stages[:symmetry_bc] = (copy(A), copy(b))
+
+    _apply_velocity_box_bc!(A, b, model, t; locked_rows=traction_locked_rows)
+    stages[:velocity_bc] = (copy(A), copy(b))
+
+    _apply_pressure_box_bc!(A, b, model, t)
+    stages[:pressure_bc] = (copy(A), copy(b))
+
+    _apply_pressure_gauge!(A, b, model)
+    stages[:gauge] = (copy(A), copy(b))
+
+    active_rows = _stokes_row_activity(model, A)
+    A, b = _apply_row_identity_constraints!(A, b, active_rows)
+    stages[:row_identity] = (A, b)
+    return stages, active_rows
+end
+
+"""
+    exact_equilibrium_residual(sys, model, xeq; t=0)
+
+Return exact-candidate defect diagnostics `A*xeq - b` on the assembled system.
+Also returns residuals for intermediate assembly stages and stage increments.
+"""
+function exact_equilibrium_residual(
+    sys::LinearSystem{T},
+    model::StokesModelTwoPhase{N,T},
+    xeq::AbstractVector{T};
+    t::T=zero(T),
+) where {N,T}
+    length(xeq) == nunknowns(model.layout) ||
+        throw(DimensionMismatch("xeq length must match system unknown count"))
+
+    r = sys.A * xeq - sys.b
+    stages, active_rows = _assemble_two_phase_stages(model, t)
+
+    stage_residuals = Dict{Symbol,Vector{T}}()
+    for (name, (A, b)) in stages
+        stage_residuals[name] = A * xeq - b
+    end
+
+    order = (:core, :traction_bc, :symmetry_bc, :velocity_bc, :pressure_bc, :gauge, :row_identity)
+    incr = Dict{Symbol,Vector{T}}()
+    prev = zeros(T, length(r))
+    for name in order
+        curr = stage_residuals[name]
+        incr[name] = curr .- prev
+        prev = curr
+    end
+
+    return (
+        residual=r,
+        stage_residuals=stage_residuals,
+        incremental_residuals=incr,
+        active_rows=active_rows,
+    )
+end
+
+function _row_coords_for_block(
+    model::StokesModelTwoPhase{N,T},
+    block::Symbol,
+    local_i::Int,
+) where {N,T}
+    if block === :uomega1_x
+        return model.cap_u1[1].C_ω[local_i]
+    elseif block === :uomega1_y
+        return model.cap_u1[2].C_ω[local_i]
+    elseif block === :uomega2_x
+        return model.cap_u2[1].C_ω[local_i]
+    elseif block === :uomega2_y
+        return model.cap_u2[2].C_ω[local_i]
+    elseif block === :ugamma1_x || block === :ugamma1_y || block === :ugamma2_x || block === :ugamma2_y
+        return model.cap_p1.C_γ[local_i]
+    elseif block === :pomega1
+        return model.cap_p1.C_ω[local_i]
+    elseif block === :pomega2
+        return model.cap_p2.C_ω[local_i]
+    end
+    return nothing
+end
+
+"""
+    block_residual_report(sys, model, r; topk=10, io=stdout)
+
+Report block-wise residual norms and worst rows for a two-phase static audit.
+"""
+function block_residual_report(
+    sys::LinearSystem{T},
+    model::StokesModelTwoPhase{N,T},
+    r::AbstractVector{T};
+    topk::Int=10,
+    io::IO=stdout,
+) where {N,T}
+    layout = model.layout
+    blocks = (
+        (:uomega1_x, layout.uomega1[1]),
+        (:uomega1_y, layout.uomega1[2]),
+        (:uomega2_x, layout.uomega2[1]),
+        (:uomega2_y, layout.uomega2[2]),
+        (:ugamma1_x, layout.ugamma1[1]),
+        (:ugamma1_y, layout.ugamma1[2]),
+        (:ugamma2_x, layout.ugamma2[1]),
+        (:ugamma2_y, layout.ugamma2[2]),
+        (:pomega1, layout.pomega1),
+        (:pomega2, layout.pomega2),
+    )
+
+    summary = Dict{Symbol,NamedTuple}()
+    println(io, "Block residual report:")
+    for (name, rows) in blocks
+        rv = @view r[rows]
+        maxabs = maximum(abs, rv)
+        l2 = norm(rv)
+        active_count = 0
+        @inbounds for row in rows
+            active_count += !_is_zero_identity_row(sys.A, sys.b, row)
+        end
+        println(io, "  ", name, ": maxabs=", maxabs, ", l2=", l2, ", active_rows=", active_count, "/", length(rows))
+
+        order = sortperm(abs.(rv); rev=true)
+        nshow = min(topk, length(order))
+        shown = 0
+        @inbounds for k in 1:nshow
+            local_i = order[k]
+            val = rv[local_i]
+            abs(val) == zero(T) && continue
+            row = rows[local_i]
+            x = _row_coords_for_block(model, name, local_i)
+            println(io, "    row=", row, " local=", local_i, " resid=", val, " x=", x)
+            shown += 1
+        end
+        shown == 0 && println(io, "    top rows are zero.")
+
+        summary[name] = (maxabs=maxabs, l2=l2, active_rows=active_count, total_rows=length(rows))
+    end
+    return summary
+end
+
+@inline function _mean_values(vals::AbstractVector{T}, idx::Vector{Int}) where {T}
+    isempty(idx) && return zero(T)
+    s = zero(T)
+    @inbounds for i in idx
+        s += vals[i]
+    end
+    return s / convert(T, length(idx))
+end
+
+@inline function _std_values(vals::AbstractVector{T}, idx::Vector{Int}) where {T}
+    n = length(idx)
+    n <= 1 && return zero(T)
+    μ = _mean_values(vals, idx)
+    s2 = zero(T)
+    @inbounds for i in idx
+        d = vals[i] - μ
+        s2 += d * d
+    end
+    return sqrt(s2 / convert(T, n - 1))
+end
+
+@inline function _weighted_mean(vals::AbstractVector{T}, idx::Vector{Int}, w::AbstractVector{T}) where {T}
+    isempty(idx) && return zero(T)
+    s = zero(T)
+    ws = zero(T)
+    @inbounds for i in idx
+        wi = w[i]
+        vi = vals[i]
+        s += wi * vi
+        ws += wi
+    end
+    return ws > zero(T) ? s / ws : _mean_values(vals, idx)
+end
+
+function _phase_pressure_stats(
+    p::AbstractVector{T},
+    cap::AssembledCapacity{N,T},
+) where {N,T}
+    idx_all = findall(_pressure_activity(cap))
+    idx_cut = Int[]
+    idx_full = Int[]
+    @inbounds for i in idx_all
+        Γi = cap.buf.Γ[i]
+        if isfinite(Γi) && Γi > zero(T)
+            push!(idx_cut, i)
+        else
+            push!(idx_full, i)
+        end
+    end
+
+    V = cap.buf.V
+    stats = Dict{Symbol,NamedTuple}()
+    for (tag, idx) in ((:all, idx_all), (:full, idx_full), (:cut, idx_cut))
+        if isempty(idx)
+            stats[tag] = (count=0, mean=zero(T), mean_weighted=zero(T), std=zero(T), min=zero(T), max=zero(T))
+            continue
+        end
+        μ = _mean_values(p, idx)
+        σ = _std_values(p, idx)
+        pmin = p[idx[1]]
+        pmax = p[idx[1]]
+        @inbounds for i in idx
+            v = p[i]
+            v < pmin && (pmin = v)
+            v > pmax && (pmax = v)
+        end
+        stats[tag] = (
+            count=length(idx),
+            mean=μ,
+            mean_weighted=_weighted_mean(p, idx, V),
+            std=σ,
+            min=pmin,
+            max=pmax,
+        )
+    end
+    return stats
+end
+
+"""
+    pressure_flatness_report(model, sys; io=stdout, verbose=false)
+
+Return phase-wise pressure flatness diagnostics on active pressure cells, with
+all/full/cut splits and simple/volume-weighted jump estimates.
+"""
+function pressure_flatness_report(
+    model::StokesModelTwoPhase{N,T},
+    sys::LinearSystem{T};
+    io::IO=stdout,
+    verbose::Bool=false,
+) where {N,T}
+    p1 = sys.x[model.layout.pomega1]
+    p2 = sys.x[model.layout.pomega2]
+    s1 = _phase_pressure_stats(p1, model.cap_p1)
+    s2 = _phase_pressure_stats(p2, model.cap_p2)
+
+    jump = Dict{Symbol,NamedTuple}()
+    for tag in (:all, :full, :cut)
+        jump[tag] = (
+            simple=s1[tag].mean - s2[tag].mean,
+            weighted=s1[tag].mean_weighted - s2[tag].mean_weighted,
+        )
+    end
+
+    if verbose
+        println(io, "Pressure flatness report:")
+        for tag in (:all, :full, :cut)
+            println(io, "  ", tag, ": p1(mean,std,min,max)=(", s1[tag].mean, ", ", s1[tag].std, ", ", s1[tag].min, ", ", s1[tag].max, ")",
+                ", p2(mean,std,min,max)=(", s2[tag].mean, ", ", s2[tag].std, ", ", s2[tag].min, ", ", s2[tag].max, ")",
+                ", jump(simple,weighted)=(", jump[tag].simple, ", ", jump[tag].weighted, ")")
+        end
+    end
+
+    return (phase1=s1, phase2=s2, jump=jump)
+end
+
+"""
+    local_capillary_balance_report(model, sigma, R; center=SVector(0,0), topk=20, io=stdout)
+
+Local interface force-balance audit on active interface-support cells.
+"""
+function local_capillary_balance_report(
+    model::StokesModelTwoPhase{N,T},
+    sigma::Real,
+    R::Real;
+    center::SVector{N,<:Real}=SVector{N,Float64}(ntuple(_ -> 0.0, N)),
+    t::T=zero(T),
+    topk::Int=20,
+    io::IO=stdout,
+) where {N,T}
+    dp = convert(T, sigma / R)
+    xc = SVector{N,T}(ntuple(d -> convert(T, center[d]), N))
+    iface = findall(isfinite.(model.cap_p1.buf.Γ) .& (model.cap_p1.buf.Γ .> zero(T)))
+
+    rows = Vector{NamedTuple}(undef, length(iface))
+    @inbounds for (k, i) in enumerate(iface)
+        Γi = model.cap_p1.buf.Γ[i]
+        xγ = model.cap_p1.C_γ[i]
+        nbar = model.cap_p1.n_γ[i]
+        fraw = _interface_force_vector(model.interface_force, xγ, t)
+        fdisc = SVector{N,T}(ntuple(d -> _consistent_interface_force_component(fraw, nbar, d), N))
+
+        dx = xγ - xc
+        rr = norm(dx)
+        ncir = rr > zero(T) ? dx / rr : SVector{N,T}(ntuple(_ -> zero(T), N))
+
+        Fraw = Γi .* fraw
+        Fdisc = Γi .* fdisc
+        Fpress = -Γi * dp .* nbar
+        rows[k] = (
+            i=i,
+            gamma=Γi,
+            xgamma=xγ,
+            n_discrete=nbar,
+            n_circle=ncir,
+            n_mismatch=nbar - ncir,
+            force_raw=Fraw,
+            force_discrete=Fdisc,
+            force_pressure=Fpress,
+            force_mismatch_raw=Fraw - Fpress,
+            force_mismatch_discrete=Fdisc - Fpress,
+        )
+    end
+
+    order = sortperm(rows; by=r -> norm(r.force_mismatch_raw), rev=true)
+    println(io, "Local capillary balance report:")
+    println(io, "  interface cells=", length(rows), ", dp_th=", dp)
+    for k in 1:min(topk, length(order))
+        r = rows[order[k]]
+        println(io, "  i=", r.i, " Γ=", r.gamma, " xγ=", r.xgamma,
+            " nΔ=", r.n_mismatch,
+            " Fraw-Fp=", r.force_mismatch_raw,
+            " Fdisc-Fp=", r.force_mismatch_discrete)
+    end
+    return rows
 end
 
 @inline function _zero_svector(::Type{T}, ::Val{N}) where {T,N}

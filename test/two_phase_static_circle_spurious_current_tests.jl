@@ -30,6 +30,26 @@ function _active_jump_indices(sys, rows)
     return [i for i in eachindex(rows) if nnz(sys.A[rows[i], :]) > 1]
 end
 
+function _velocity_l2_combined(model, u1x, u1y, u2x, u2y)
+    e2 = 0.0
+    w = 0.0
+    for (cap, vals) in (
+        (model.cap_u1[1], u1x),
+        (model.cap_u1[2], u1y),
+        (model.cap_u2[1], u2x),
+        (model.cap_u2[2], u2y),
+    )
+        idx = _active_velocity_indices(cap)
+        @inbounds for i in idx
+            Vi = cap.buf.V[i]
+            v = vals[i]
+            e2 += Vi * v * v
+            w += Vi
+        end
+    end
+    return sqrt(e2 / max(w, eps(Float64)))
+end
+
 @testset "Step 0 - null Stokes with spherical interface (2D)" begin
     n = 36
     R = 0.35
@@ -316,8 +336,6 @@ end
     @test !isempty(idx_ugx)
     @test !isempty(idx_ugy)
 
-    println("uwx", sys.x[model.layout.uomega[1]])
-    println("uwy", sys.x[model.layout.uomega[2]])
     ex = zeros(length(idx_ugx))
     ey = zeros(length(idx_ugy))
     @inbounds for (k, i) in enumerate(idx_ugx)
@@ -346,72 +364,91 @@ end
     @test abs(abs(Qh) - Qth) / Qth < 1e-2
 end
 
-@testset "Two-phase static spurious-current benchmark (2D, Dcell=6.4)" begin
-    # Literature-style static cylinder benchmark parameters.
-    D = 0.4
-    R = D / 2
-    mu = 0.1
-    rho = 300.0
+@testset "Two-phase static circle exact capillary balance (2D)" begin
+    R = 0.35
     sigma = 1.0
+    mu = 1.0
     dp_th = sigma / R
-    La = rho * sigma * D / mu^2
-    n = 16 # Dcell = D / (1/n) = 6.4
-    xc, yc = 0.5, 0.5
-
-    @test isapprox(La, 1.2e4; atol=1e-9, rtol=0.0)
-
-    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (n, n))
-    body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - R
+    xc, yc = 0.0, 0.0
 
     bc0 = BorderConditions(
         ; left=Dirichlet(0.0), right=Dirichlet(0.0),
         bottom=Dirichlet(0.0), top=Dirichlet(0.0),
     )
 
-    interface_force(x, y) = begin
-        dx = x - xc
-        dy = y - yc
-        rr = hypot(dx, dy)
-        rr == 0.0 ? SVector(0.0, 0.0) : -(dp_th) * SVector(dx / rr, dy / rr)
+    for n in (33)
+        grid = CartesianGrid((-1.0, -1.0), (1.0, 1.0), (n, n))
+        body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - R
+
+        # Keep sign convention explicit:
+        # body = r-R and interface_force = -(sigma/R) n => p_in - p_out = sigma/R.
+        interface_force(x, y) = begin
+            dx = x - xc
+            dy = y - yc
+            rr = hypot(dx, dy)
+            rr == 0.0 ? SVector(0.0, 0.0) : -(dp_th) * SVector(dx / rr, dy / rr)
+        end
+
+        model = StokesModelTwoPhase(
+            grid,
+            body,
+            mu,
+            mu;
+            rho1=1.0,
+            rho2=1.0,
+            bc_u=(bc0, bc0),
+            force1=(0.0, 0.0),
+            force2=(0.0, 0.0),
+            interface_force=interface_force,
+            gauge=MeanPressureGauge(),
+        )
+
+        sys = solve_steady!(model)
+        @test norm(sys.A * sys.x - sys.b) < 1e-10
+
+        xeq = PenguinStokes.build_static_circle_equilibrium_state(
+            model;
+            sigma=sigma,
+            R=R,
+            gauge=:mean,
+            sys=sys,
+        )
+        eq = PenguinStokes.exact_equilibrium_residual(sys, model, xeq)
+        eq_summary = PenguinStokes.block_residual_report(sys, model, eq.residual; topk=3, io=devnull)
+
+        @test eq_summary[:uomega1_x].maxabs < 1e-12
+        @test eq_summary[:uomega1_y].maxabs < 1e-12
+        @test eq_summary[:uomega2_x].maxabs < 1e-12
+        @test eq_summary[:uomega2_y].maxabs < 1e-12
+        @test eq_summary[:ugamma1_x].maxabs < 1e-12
+        @test eq_summary[:ugamma1_y].maxabs < 1e-12
+        @test eq_summary[:ugamma2_x].maxabs < 1e-12
+        @test eq_summary[:ugamma2_y].maxabs < 1e-12
+        @test eq_summary[:pomega1].maxabs < 1e-12
+        @test eq_summary[:pomega2].maxabs < 1e-12
+
+        u1x = sys.x[model.layout.uomega1[1]]
+        u1y = sys.x[model.layout.uomega1[2]]
+        u2x = sys.x[model.layout.uomega2[1]]
+        u2y = sys.x[model.layout.uomega2[2]]
+
+        idx_u1x = _active_velocity_indices(model.cap_u1[1])
+        idx_u1y = _active_velocity_indices(model.cap_u1[2])
+        idx_u2x = _active_velocity_indices(model.cap_u2[1])
+        idx_u2y = _active_velocity_indices(model.cap_u2[2])
+
+        umax = max(maximum(abs, u1x[idx_u1x]), maximum(abs, u2x[idx_u2x]))
+        vmax = max(maximum(abs, u1y[idx_u1y]), maximum(abs, u2y[idx_u2y]))
+        uinf = max(umax, vmax)
+        ul2 = _velocity_l2_combined(model, u1x, u1y, u2x, u2y)
+        @test uinf < 1e-11
+        @test ul2 < 1e-12
+
+        flat = PenguinStokes.pressure_flatness_report(model, sys; io=devnull, verbose=false)
+        dp_num = flat.jump[:all].simple
+        jump_relerr = abs(dp_num - dp_th) / abs(dp_th)
+        @test jump_relerr < 1e-12
+        @test flat.phase1[:all].std < 2e-11
+        @test flat.phase2[:all].std < 2e-11
     end
-
-    model = StokesModelTwoPhase(
-        grid,
-        body,
-        mu,
-        mu;
-        rho1=rho,
-        rho2=rho,
-        bc_u=(bc0, bc0),
-        force1=(0.0, 0.0),
-        force2=(0.0, 0.0),
-        interface_force=interface_force,
-    )
-
-    sys = solve_steady!(model)
-
-    u1x = sys.x[model.layout.uomega1[1]]
-    u1y = sys.x[model.layout.uomega1[2]]
-    u2x = sys.x[model.layout.uomega2[1]]
-    u2y = sys.x[model.layout.uomega2[2]]
-
-    idx_u1x = _active_velocity_indices(model.cap_u1[1])
-    idx_u1y = _active_velocity_indices(model.cap_u1[2])
-    idx_u2x = _active_velocity_indices(model.cap_u2[1])
-    idx_u2y = _active_velocity_indices(model.cap_u2[2])
-
-    umax = max(maximum(abs, u1x[idx_u1x]), maximum(abs, u2x[idx_u2x]))
-    vmax = max(maximum(abs, u1y[idx_u1y]), maximum(abs, u2y[idx_u2y]))
-    uabsmax = max(umax, vmax)
-    camax = mu * uabsmax / sigma
-
-    p1 = sys.x[model.layout.pomega1]
-    p2 = sys.x[model.layout.pomega2]
-    idx_p1 = findall(PenguinStokes._pressure_activity(model.cap_p1))
-    idx_p2 = findall(PenguinStokes._pressure_activity(model.cap_p2))
-    dp_num = _avg(p1, idx_p1) - _avg(p2, idx_p2)
-    jump_relerr = abs(dp_num - dp_th) / abs(dp_th)
-
-    @test camax < 5e-3
-    @test jump_relerr < 0.05
 end
