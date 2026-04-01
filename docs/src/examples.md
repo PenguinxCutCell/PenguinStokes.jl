@@ -16,7 +16,7 @@ Representative examples:
 ```bash
 julia --project=. examples/04_mms_convergence.jl
 julia --project=. examples/08_two_phase_mms_fixed_interface.jl
-julia --project=. examples/two_phase_static_circle_spurious_current.jl
+julia --project=. examples/27_two_phase_static_circle_spurious_current.jl
 julia --project=. examples/14_unsteady_oscillating_cylinder.jl
 julia --project=. examples/22_3d_falling_rigid_sphere_split_vs_strong.jl
 ```
@@ -64,7 +64,7 @@ julia --project=. test/dev_traction_box_probe.jl
 ### Scripts
 
 - `examples/08_two_phase_mms_fixed_interface.jl`
-- `examples/two_phase_static_circle_spurious_current.jl`
+- `examples/27_two_phase_static_circle_spurious_current.jl`
 - `examples/09_two_phase_planar_couette.jl`
 - `examples/10_two_phase_planar_poiseuille.jl`
 - `examples/11_two_phase_oscillatory_couette.jl`
@@ -75,6 +75,7 @@ julia --project=. test/dev_traction_box_probe.jl
 - traction/interface-force row path,
 - shared interface trace behavior,
 - pressure-jump handling,
+- static-circle snapshot plotting (velocity arrows + pressure map) and Laplace sweep diagnostics (`La = rho*D*sigma/mu^2`, `Ca = ||u||_inf*mu/sigma`),
 - layered profile reproduction (Couette/Poiseuille),
 - oscillatory response, fixed-drop drag trends.
 
@@ -150,7 +151,7 @@ julia --project=. test/dev_traction_box_probe.jl
 | `runtests.jl` mono MMS blocks | Mono steady/unsteady | assembly consistency + convergence trends | residuals small, errors decrease with refinement | Implemented |
 | `06_mms_convergence_embedded_outside_circle.jl` | Mono cut-cell | embedded-interface MMS behavior | convergence trend and stable solve | Implemented |
 | `08_two_phase_mms_fixed_interface.jl` | Two-phase fixed interface | traction jump path | near-zero velocity with imposed jump | Implemented |
-| `two_phase_static_circle_spurious_current.jl` + test | Two-phase fixed interface | spurious-current level + Laplace jump | `u` near zero and pressure jump close to theory | Implemented |
+| `27_two_phase_static_circle_spurious_current.jl` + test | Two-phase fixed interface | spurious-current level + Laplace jump | `u` near zero and pressure jump close to theory | Implemented |
 | `09/10/11` layered examples | Two-phase fixed interface | Couette/Poiseuille/oscillatory profiles | profile and phase behavior match expectations | Implemented |
 | `13/25` moving examples + `moving_boundary_stokes_tests.jl` | Moving mono | slab/end-time moving assembly behavior | stable stepping and expected temporal trends | Implemented |
 | outlet/symmetry testsets + `dev_*` probes | Mono BC algebra | traction/outlet/symmetry row semantics | row-equivalence and sign rules hold | Implemented |
