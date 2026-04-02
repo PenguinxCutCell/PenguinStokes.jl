@@ -54,6 +54,20 @@ end
     @test model_moving isa MovingStokesModelMono
     @test last(model_moving.layout.pomega) > 0
 
+    model_moving_two = MovingStokesModelTwoPhase(
+        grid,
+        (x, y, t) -> y - (0.5 + 0.05 * sin(t)),
+        1.0,
+        2.0;
+        bc_u=(bc, bc),
+        force1=(0.0, 0.0),
+        force2=(0.0, 0.0),
+        interface_jump=(0.0, 0.0),
+        interface_force=(0.0, 0.0),
+    )
+    @test model_moving_two isa MovingStokesModelTwoPhase
+    @test last(model_moving_two.layout.pomega2) > last(model_moving_two.layout.pomega1)
+
     shape = Circle(0.12)
     state = RigidBodyState2D(SVector(0.5, 0.5), SVector(0.0, 0.0); theta=0.0, omega=0.0)
     params = RigidBodyParams2D(1.0, 1.0, shape, SVector(0.0, 0.0); rho_fluid=0.0, buoyancy=false)

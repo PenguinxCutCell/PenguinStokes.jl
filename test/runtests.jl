@@ -1851,6 +1851,7 @@ end
 end
 
 include("moving_boundary_stokes_tests.jl")
+include("moving_boundary_stokes_twophase_tests.jl")
 include("fsi_tests.jl")
 include("api_smoke_tests.jl")
 include("dev_outlet_row_equivalence.jl")
