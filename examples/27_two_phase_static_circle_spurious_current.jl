@@ -74,12 +74,20 @@ function run_case(
     # Sign convention retained explicitly:
     # body = r - R and interface_force = -(sigma/R) n,
     # so p_in - p_out = sigma/R.
-    interface_force(x, y) = begin
-        dx = x - xc
-        dy = y - yc
-        rr = hypot(dx, dy)
-        rr == 0.0 ? SVector(0.0, 0.0) : -(dp_th) * SVector(dx / rr, dy / rr)
-    end
+    #
+    # The callback now accepts (x, y, nx, ny) signature to use the discrete normal
+    # vector from the cut-cell geometry. This ensures exact-equilibrium satisfaction
+    # to machine precision by using the same normal moments for both pressure coupling
+    # and capillary force computation.
+    interface_force(x, y, nx, ny) = -(dp_th) * SVector(nx, ny)
+
+    # Fallback for position-only signature (used if discrete normal not available):
+    # interface_force(x, y) = begin
+    #     dx = x - xc
+    #     dy = y - yc
+    #     rr = hypot(dx, dy)
+    #     rr == 0.0 ? SVector(0.0, 0.0) : -(dp_th) * SVector(dx / rr, dy / rr)
+    # end
 
     model = StokesModelTwoPhase(
         grid,

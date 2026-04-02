@@ -617,6 +617,38 @@ function _interface_force_vector(interface_force, x::SVector{N,T}, t::T) where {
     throw(ArgumentError("unsupported interface forcing type $(typeof(interface_force))"))
 end
 
+function _interface_force_vector_with_normal(interface_force, x::SVector{N,T}, n::SVector{N,T}, t::T) where {N,T}
+    """
+    Call interface_force callback with optional discrete normal vector.
+    Supports signatures: (x..., nx, ny, ..., t), (x..., nx, ny, ...), and fallback to _interface_force_vector.
+    """
+    if interface_force isa Number
+        fv = convert(T, interface_force)
+        return SVector{N,T}(ntuple(_ -> fv, N))
+    elseif interface_force isa NTuple{N,Any}
+        # For tuple forcing, use component-wise callbacks; they don't support normals
+        return _interface_force_vector(interface_force, x, t)
+    elseif interface_force isa Function
+        # Try signatures with discrete normal first
+        if N == 2
+            if applicable(interface_force, x[1], x[2], n[1], n[2], t)
+                return _as_interface_force_vector(interface_force(x[1], x[2], n[1], n[2], t), Val(N), T)
+            elseif applicable(interface_force, x[1], x[2], n[1], n[2])
+                return _as_interface_force_vector(interface_force(x[1], x[2], n[1], n[2]), Val(N), T)
+            end
+        elseif N == 3
+            if applicable(interface_force, x[1], x[2], x[3], n[1], n[2], n[3], t)
+                return _as_interface_force_vector(interface_force(x[1], x[2], x[3], n[1], n[2], n[3], t), Val(N), T)
+            elseif applicable(interface_force, x[1], x[2], x[3], n[1], n[2], n[3])
+                return _as_interface_force_vector(interface_force(x[1], x[2], x[3], n[1], n[2], n[3]), Val(N), T)
+            end
+        end
+        # Fallback to position-only signatures
+        return _interface_force_vector(interface_force, x, t)
+    end
+    throw(ArgumentError("unsupported interface forcing type $(typeof(interface_force))"))
+end
+
 @inline function _consistent_interface_force_component(
     fγ::SVector{N,T},
     nγ::SVector{N,T},
@@ -2524,8 +2556,8 @@ function _interface_condition_values(
             rhs_jump[i] = convert(T, eval_bc(sb.value, xi, t))
         end
         if fbc === nothing
-            fγ = _interface_force_vector(model.interface_force, xi, t)
             nγ = SVector{N,T}(ntuple(k -> normals[k][i], N))
+            fγ = _interface_force_vector_with_normal(model.interface_force, xi, nγ, t)
             rhs_trac[i] = Γi * _consistent_interface_force_component(fγ, nγ, d)
         else
             fb = fbc::FluxJump
