@@ -77,6 +77,7 @@ Status labels used here:
 | MMS (mono) | Implemented | `examples/01/04/05/24`, multiple testsets |
 | Planar Couette (two-phase) | Implemented | `examples/09`, testset in `runtests.jl` |
 | Planar Poiseuille (two-phase) | Implemented | `examples/10`, testset in `runtests.jl` |
+| Planar Couette-Poiseuille (two-phase) | Implemented | `examples/10_bis` |
 | Oscillatory Couette (two-phase) | Implemented | `examples/11` |
 | Moving-body verification | Implemented | `examples/13/14/25` + moving tests |
 | Drag/force verification | Implemented | postprocessing tests + `examples/12/21` |

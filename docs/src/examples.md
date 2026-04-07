@@ -67,6 +67,7 @@ julia --project=. test/dev_traction_box_probe.jl
 - `examples/27_two_phase_static_circle_spurious_current.jl`
 - `examples/09_two_phase_planar_couette.jl`
 - `examples/10_two_phase_planar_poiseuille.jl`
+- `examples/10_bis_two_phase_planar_couette_poiseuille.jl`
 - `examples/11_two_phase_oscillatory_couette.jl`
 - `examples/12_two_phase_viscous_drop_drag.jl`
 

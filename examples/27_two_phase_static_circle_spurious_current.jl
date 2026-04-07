@@ -256,6 +256,48 @@ function pressure_map_data(r)
     return xp, yp, pv
 end
 
+function pressure_3d_point_data(r)
+    model = r.model
+    sys = r.sys
+    body = r.body
+    layout = model.layout
+
+    p1 = sys.x[layout.pomega1]
+    p2 = sys.x[layout.pomega2]
+
+    active_p1 = PenguinStokes._pressure_activity(model.cap_p1)
+    active_p2 = PenguinStokes._pressure_activity(model.cap_p2)
+
+    idx_p2 = findall(active_p2)
+    p_out_mean = mean(p2[idx_p2])
+    coords = model.cap_p1.C_ω
+
+    xin = Float64[]
+    yin = Float64[]
+    zin = Float64[]
+    xout = Float64[]
+    yout = Float64[]
+    zout = Float64[]
+
+    @inbounds for i in eachindex(coords)
+        x = coords[i][1]
+        y = coords[i][2]
+        inside = body(x, y) <= 0.0
+
+        if inside && active_p1[i]
+            push!(xin, x)
+            push!(yin, y)
+            push!(zin, p1[i] - p_out_mean)
+        elseif !inside && active_p2[i]
+            push!(xout, x)
+            push!(yout, y)
+            push!(zout, p2[i] - p_out_mean)
+        end
+    end
+
+    return xin, yin, zin, xout, yout, zout
+end
+
 function plot_single_case(
     r;
     filename::AbstractString,
@@ -266,7 +308,7 @@ function plot_single_case(
     xv, yv, uv, vv = velocity_arrow_data(r; stride=arrow_stride)
     xp, yp, pv = pressure_map_data(r)
 
-    fig = Figure(size=(1200, 520), fontsize=15)
+    fig = Figure(size=(1600, 520), fontsize=15)
 
     axv = Axis(
         fig[1, 1],
@@ -281,17 +323,28 @@ function plot_single_case(
     lines!(axv, r.R .* cos.(theta), r.R .* sin.(theta); color=:dodgerblue3, linewidth=2)
     limits!(axv, -1, 1, -1, 1)
 
-    axp = Axis(
+    xin, yin, zin, xout, yout, zout = pressure_3d_point_data(r)
+    zall = vcat(zin, zout)
+    zmin = isempty(zall) ? -1.0 : minimum(zall)
+    zmax = isempty(zall) ? 1.0 : maximum(zall)
+    zpad = 0.05 * max(abs(zmax - zmin), 1e-12)
+
+    ax3 = Axis3(
         fig[1, 2],
-        title="Pressure map (inside/outside)",
+        title="Pressure DOFs",
         xlabel="x",
         ylabel="y",
-        aspect=DataAspect(),
+        zlabel="Pressure",
+        azimuth=0.95,
+        elevation=0.35,
     )
-    hm = scatter!(axp, xp, yp; color=pv, colormap=:viridis, marker=:rect, markersize=pressure_marker_size)
-    lines!(axp, r.R .* cos.(theta), r.R .* sin.(theta); color=:white, linewidth=2)
-    limits!(axp, -1, 1, -1, 1)
-    Colorbar(fig[1, 3], hm, label="p - mean(p_out)")
+    scatter!(ax3, xin, yin, zin; color=:tomato2, markersize=7, label="inside (phase 1)")
+    scatter!(ax3, xout, yout, zout; color=:dodgerblue3, markersize=7, label="outside (phase 2)")
+    lines!(ax3, r.R .* cos.(theta), r.R .* sin.(theta), fill(0.0, length(theta)); color=:black, linewidth=2)
+    xlims!(ax3, -1.0, 1.0)
+    ylims!(ax3, -1.0, 1.0)
+    zlims!(ax3, zmin - zpad, zmax + zpad)
+    axislegend(ax3; position=:rb)
 
     summary = @sprintf(
         "uinf=%.3e, ul2=%.3e, Ca=%.3e\np_in=%.12f, p_out=%.12f\ndp_num=%.12f, dp_th=%.12f, rel_err=%.3e\np1_std=%.3e, p2_std=%.3e",
@@ -306,7 +359,7 @@ function plot_single_case(
         r.p1_std,
         r.p2_std,
     )
-    Label(fig[2, 1:3], summary; tellheight=true)
+    Label(fig[2, 1:2], summary; tellheight=true)
 
     save(filename, fig)
 end
@@ -318,7 +371,7 @@ function run_laplace_sweep(
     sigma::Float64,
     rho::Float64,
     La_min::Float64=12.0,
-    La_max::Float64=120000.0,
+    La_max::Float64=1200000.0,
     npoints::Int=3,
     gauge::AbstractPressureGauge=MeanPressureGauge(),
 )
@@ -352,7 +405,7 @@ function plot_laplace_sweep(results; filename::AbstractString)
         fig[1, 1],
         title="Capillary number vs Laplace number",
         xlabel="Laplace number La",
-        ylabel="Ca = ||u||_inf * mu / sigma",
+        ylabel=L"Ca = ||u||_{inf} \mu / \sigma",
         xscale=log10,
         yscale=log10,
     )
@@ -386,9 +439,9 @@ function main()
     single_plot_file = get(ENV, "PS_SINGLE_FIG", "two_phase_static_circle_snapshot_n$(n).png")
     sweep_plot_file = get(ENV, "PS_SWEEP_FIG", "two_phase_static_circle_laplace_sweep_n$(n).png")
 
-    sweep_points = parse(Int, get(ENV, "PS_LA_POINTS", "9"))
+    sweep_points = parse(Int, get(ENV, "PS_LA_POINTS", "10"))
     La_min = parse(Float64, get(ENV, "PS_LA_MIN", "12.0"))
-    La_max = parse(Float64, get(ENV, "PS_LA_MAX", "120000.0"))
+    La_max = parse(Float64, get(ENV, "PS_LA_MAX", "1200000.0"))
 
     single = run_case(; n=n, R=R, sigma=sigma, mu=1.0, rho=rho, gauge=MeanPressureGauge())
     print_single_case_summary(single)
