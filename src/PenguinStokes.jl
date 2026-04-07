@@ -974,9 +974,14 @@ end
 
 function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrixCSC{T,Int}) where {N,T}
     isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
-    isnothing(model.cap_p_end) && throw(ArgumentError("moving model pressure end-capacity cache is not built"))
+    isnothing(model.cap_p_slab) && throw(ArgumentError("moving model pressure slab-capacity cache is not built"))
     cap_u_end = something(model.cap_u_end)
-    cap_p_end = something(model.cap_p_end)
+    # Use the slab pressure capacity for activity: a pressure cell is active when it had
+    # nonzero fluid volume during the time step [t, t+dt].  Cells that existed only at
+    # the start time (V_end=0 but V_slab>0) still carry a valid incompressibility
+    # constraint from the slab divergence operator; cells that are completely empty in
+    # the slab (V_slab=0) are genuinely inactive.
+    cap_p_slab = something(model.cap_p_slab)
 
     layout = model.layout
     active = falses(nunknowns(layout))
@@ -988,10 +993,32 @@ function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrix
         end
     end
 
-    pactive = _pressure_activity(cap_p_end)
+    # Deactivate pressure cells whose slab volume is below a small-cell threshold.
+    # Cells with V_slab ≪ h^N (sliver cells at the domain boundary) have near-zero
+    # gradient coupling in the momentum rows, making their pressure ill-determined.
+    h = minimum(meshsize(model.gridp))
+    eps_cut = convert(T, 1e-3)
+    min_vol = eps_cut * h^N
+    pactive = BitVector(undef, cap_p_slab.ntotal)
+    @inbounds for i in 1:cap_p_slab.ntotal
+        v = cap_p_slab.buf.V[i]
+        pactive[i] = isfinite(v) && v >= min_vol
+    end
+    # Also deactivate halo nodes.
+    li = LinearIndices(cap_p_slab.nnodes)
+    @inbounds for I in CartesianIndices(cap_p_slab.nnodes)
+        i = li[I]
+        for d in 1:N
+            if I[d] == cap_p_slab.nnodes[d]
+                pactive[i] = false
+                break
+            end
+        end
+    end
+
     pfirst = first(layout.pomega)
     plast = last(layout.pomega)
-    @inbounds for i in 1:cap_p_end.ntotal
+    @inbounds for i in 1:cap_p_slab.ntotal
         pactive[i] || continue
         col = layout.pomega[i]
         coupled = false
@@ -1004,7 +1031,7 @@ function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrix
         end
         pactive[i] = coupled
     end
-    @inbounds for i in 1:cap_p_end.ntotal
+    @inbounds for i in 1:cap_p_slab.ntotal
         active[layout.pomega[i]] = pactive[i]
     end
     return _prune_uncoupled_active!(active, A)
@@ -1013,12 +1040,15 @@ end
 function _stokes_row_activity(model::MovingStokesModelTwoPhase{N,T}, A::SparseMatrixCSC{T,Int}) where {N,T}
     isnothing(model.cap_u1_end) && throw(ArgumentError("moving two-phase model phase-1 velocity end-capacity cache is not built"))
     isnothing(model.cap_u2_end) && throw(ArgumentError("moving two-phase model phase-2 velocity end-capacity cache is not built"))
-    isnothing(model.cap_p1_end) && throw(ArgumentError("moving two-phase model phase-1 pressure end-capacity cache is not built"))
-    isnothing(model.cap_p2_end) && throw(ArgumentError("moving two-phase model phase-2 pressure end-capacity cache is not built"))
+    isnothing(model.cap_p1_slab) && throw(ArgumentError("moving two-phase model phase-1 pressure slab-capacity cache is not built"))
+    isnothing(model.cap_p2_slab) && throw(ArgumentError("moving two-phase model phase-2 pressure slab-capacity cache is not built"))
     cap_u1_end = something(model.cap_u1_end)
     cap_u2_end = something(model.cap_u2_end)
+    # Use slab capacities for pressure activity: a cell is active when it had nonzero
+    # fluid volume during [t, t+dt], which is correctly captured by the slab geometry.
+    cap_p1_slab = something(model.cap_p1_slab)
+    cap_p2_slab = something(model.cap_p2_slab)
     cap_p1_end = something(model.cap_p1_end)
-    cap_p2_end = something(model.cap_p2_end)
 
     layout = model.layout
     active = falses(nunknowns(layout))
@@ -1036,15 +1066,35 @@ function _stokes_row_activity(model::MovingStokesModelTwoPhase{N,T}, A::SparseMa
         end
     end
 
-    p1active = _pressure_activity(cap_p1_end)
-    p2active = _pressure_activity(cap_p2_end)
+    # Deactivate pressure cells below the small-cell volume threshold.
+    h = minimum(meshsize(model.gridp))
+    eps_cut = convert(T, 1e-3)
+    min_vol = eps_cut * h^N
+    li = LinearIndices(cap_p1_slab.nnodes)
+
+    function _slab_pactive(cap_p_slab)
+        pa = BitVector(undef, cap_p_slab.ntotal)
+        @inbounds for I in CartesianIndices(cap_p_slab.nnodes)
+            i = li[I]
+            halo = any(d -> I[d] == cap_p_slab.nnodes[d], 1:N)
+            if halo
+                pa[i] = false
+                continue
+            end
+            v = cap_p_slab.buf.V[i]
+            pa[i] = isfinite(v) && v >= min_vol
+        end
+        return pa
+    end
+    p1active = _slab_pactive(cap_p1_slab)
+    p2active = _slab_pactive(cap_p2_slab)
 
     p1first = first(layout.pomega1)
     p1last = last(layout.pomega1)
     p2first = first(layout.pomega2)
     p2last = last(layout.pomega2)
 
-    @inbounds for i in 1:cap_p1_end.ntotal
+    @inbounds for i in 1:cap_p1_slab.ntotal
         p1active[i] || continue
         col = layout.pomega1[i]
         coupled = false
@@ -1058,7 +1108,7 @@ function _stokes_row_activity(model::MovingStokesModelTwoPhase{N,T}, A::SparseMa
         p1active[i] = coupled
     end
 
-    @inbounds for i in 1:cap_p2_end.ntotal
+    @inbounds for i in 1:cap_p2_slab.ntotal
         p2active[i] || continue
         col = layout.pomega2[i]
         coupled = false
@@ -1072,7 +1122,7 @@ function _stokes_row_activity(model::MovingStokesModelTwoPhase{N,T}, A::SparseMa
         p2active[i] = coupled
     end
 
-    @inbounds for i in 1:cap_p1_end.ntotal
+    @inbounds for i in 1:cap_p1_slab.ntotal
         active[layout.pomega1[i]] = p1active[i]
         active[layout.pomega2[i]] = p2active[i]
     end
@@ -3490,14 +3540,14 @@ function assemble_unsteady_moving!(
 
     div_omega = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        gp = op_p_end.G[rows, :]
-        hp = op_p_end.H[rows, :]
+        gp = op_p_slab.G[rows, :]
+        hp = op_p_slab.H[rows, :]
         -(gp' + hp')
     end, N)
 
     div_gamma = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        hp = op_p_end.H[rows, :]
+        hp = op_p_slab.H[rows, :]
         sparse(hp')
     end, N)
 
@@ -3680,25 +3730,25 @@ function assemble_unsteady_moving!(
 
     div_omega1 = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        gp = op_p1_end.G[rows, :]
-        hp = op_p1_end.H[rows, :]
+        gp = op_p1_slab.G[rows, :]
+        hp = op_p1_slab.H[rows, :]
         -(gp' + hp')
     end, N)
     div_gamma1 = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        hp = op_p1_end.H[rows, :]
+        hp = op_p1_slab.H[rows, :]
         sparse(hp')
     end, N)
 
     div_omega2 = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        gp = op_p2_end.G[rows, :]
-        hp = op_p2_end.H[rows, :]
+        gp = op_p2_slab.G[rows, :]
+        hp = op_p2_slab.H[rows, :]
         -(gp' + hp')
     end, N)
     div_gamma2 = ntuple(d -> begin
         rows = ((d - 1) * nt + 1):(d * nt)
-        hp = op_p2_end.H[rows, :]
+        hp = op_p2_slab.H[rows, :]
         sparse(hp')
     end, N)
 
