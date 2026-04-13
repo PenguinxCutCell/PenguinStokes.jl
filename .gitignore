@@ -3,3 +3,4 @@ docs/Manifest.toml
 docs/build
 *.png
 *.csv
+AGENTS.md
