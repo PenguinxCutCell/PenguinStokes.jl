@@ -1060,7 +1060,7 @@ function _stokes_row_activity(model::MovingStokesModelTwoPhase{N,T}, A::SparseMa
         for i in 1:cap_u1_end[d].ntotal
             active[layout.uomega1[d][i]] = aomega1[i]
             active[layout.uomega2[d][i]] = aomega2[i]
-            has_gamma = (agamma1[i] || agamma2[i]) && agamma_p[i]
+            has_gamma = (agamma1[i] || agamma2[i]) && (agamma_p[i] || aomega1[i] || aomega2[i])
             active[layout.ugamma1[d][i]] = has_gamma
             active[layout.ugamma2[d][i]] = has_gamma
         end
@@ -2535,8 +2535,19 @@ function reduce_slab_to_space(
         nγ[i] = SVector{N,T}(ntuple(d -> ni[d], N))
     end
 
+    face_bary_st = ntuple(d -> _slice_spacetime_to_space(m_st.face_barycenter[d], nn_space, nt, 1), N)
+    face_bary = ntuple(d -> begin
+        fb_d = Vector{SVector{N,T}}(undef, length(V))
+        fb_st = face_bary_st[d]
+        @inbounds for i in eachindex(V)
+            fbi = fb_st[i]
+            fb_d[i] = SVector{N,T}(ntuple(dd -> fbi[dd], N))
+        end
+        fb_d
+    end, N)
+
     xyz = ntuple(d -> collect(T, m_st.xyz[d]), N)
-    return GeometricMoments(V, bary, Γ, ctype, baryγ, nγ, A, B, W, xyz)
+    return GeometricMoments(V, bary, Γ, ctype, baryγ, nγ, A, B, W, face_bary, xyz)
 end
 
 function _build_moving_slab!(
@@ -3215,6 +3226,52 @@ function _assemble_interface_traction_rows!(
     return A, b
 end
 
+function _apply_auxiliary_trace_rows!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    model::MovingStokesModelTwoPhase{N,T},
+) where {N,T}
+    isnothing(model.cap_u1_end) && throw(ArgumentError("moving two-phase model phase-1 velocity end-capacity cache is not built"))
+    isnothing(model.cap_u2_end) && throw(ArgumentError("moving two-phase model phase-2 velocity end-capacity cache is not built"))
+    isnothing(model.cap_p1_end) && throw(ArgumentError("moving two-phase model phase-1 pressure end-capacity cache is not built"))
+
+    cap_u1_end = something(model.cap_u1_end)
+    cap_u2_end = something(model.cap_u2_end)
+    cap_p1_end = something(model.cap_p1_end)
+    _, agamma_p = _cell_activity_masks(cap_p1_end)
+    layout = model.layout
+
+    @inbounds for d in 1:N
+        aomega1, agamma1 = _cell_activity_masks(cap_u1_end[d])
+        aomega2, agamma2 = _cell_activity_masks(cap_u2_end[d])
+        for i in 1:layout.nt
+            (agamma1[i] || agamma2[i]) || continue
+            agamma_p[i] && continue
+
+            cols = Int[layout.ugamma1[d][i]]
+            vals = T[one(T)]
+            v1 = aomega1[i] ? cap_u1_end[d].buf.V[i] : zero(T)
+            v2 = aomega2[i] ? cap_u2_end[d].buf.V[i] : zero(T)
+            wsum = ((isfinite(v1) && v1 > zero(T)) ? v1 : zero(T)) +
+                   ((isfinite(v2) && v2 > zero(T)) ? v2 : zero(T))
+            wsum > zero(T) || continue
+
+            if isfinite(v1) && v1 > zero(T)
+                push!(cols, layout.uomega1[d][i])
+                push!(vals, -v1 / wsum)
+            end
+            if isfinite(v2) && v2 > zero(T)
+                push!(cols, layout.uomega2[d][i])
+                push!(vals, -v2 / wsum)
+            end
+
+            _set_sparse_row!(A, b, layout.ugamma1[d][i], cols, vals, zero(T))
+        end
+    end
+
+    return A, b
+end
+
 function _assemble_core!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelTwoPhase{N,T}, blocks, t::T) where {N,T}
     layout = model.layout
     phase1 = blocks.phase1
@@ -3813,6 +3870,7 @@ function assemble_unsteady_moving!(
         phase2=_stokes_phase_blocks(cap_p2_end, op_p2_end, cap_u2_end, op_u2_end, model.mu2, model.rho2, model.periodic),
     )
     _assemble_interface_traction_rows!(A, b, model, blocks_iface, t_next)
+    _apply_auxiliary_trace_rows!(A, b, model)
 
     traction_locked_rows = _apply_traction_box_bc!(A, b, model, t_next)
     _apply_symmetry_box_bc!(A, b, model, t_next, traction_locked_rows)

@@ -4,3 +4,4 @@ docs/build
 *.png
 *.csv
 AGENTS.md
+RESIDUAL_ADVECTION.md

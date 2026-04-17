@@ -1,8 +1,4 @@
 # TODO
 
-- [x] Spurious Current Laplace jump static is not working well.
-- [x] Add two-phase prescribed moving embedded boundary solver and examples
-- [ ] The two-phase prescribed moving embedded boundary solver is not working well for the MMS convergence : solver explosion and non convergent for CN
+- [x] The two-phase prescribed moving embedded boundary solver is working almost well. BE ok CN still one tiny blow up at n=25 maybe due to geometry limiting case. See `examples/30_moving_two_phase_mms_mesh_convergence.jl`. 
 - [ ] Add one-phase free-boundary solver and examples.
-- [x] Fix moving monophasic MMS temporal convergence on embedded moving interface (current observed orders are ~0.5-0.73 for BE/CN/θ in `examples/25_moving_mms_time_schemes.jl`).
-- [x] Add diphasic moving-interface MMS convergence benchmark for `MovingStokesModelTwoPhase`.

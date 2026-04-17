@@ -141,6 +141,18 @@ Developer probe scripts (retained intentionally):
 - `test/dev_outlet_row_equivalence.jl` (included in `runtests.jl`)
 - `test/dev_traction_box_probe.jl` (included in `runtests.jl`)
 
+## Benchmarks
+
+| Benchmark | Description | Status |
+|---|---|---|
+| No Interface MMS | 2nd order convergence | ok |
+| Embedded Interface MMS | 2nd order convergence | ok |
+| Two-Phase Fixed Interface MMS | 2nd order convergence | ok |
+| Static Drop Spurious Current | Laplace jump test | ok |
+| No Interface moving MMS | 2nd order convergence | ok |
+| Moving Mono | 2nd order convergence | ok |
+| Moving Two-Phase | 2nd order convergence | (BE ok / CN still one tiny blow up at n=25 maybe due to geometry limiting case) |
+
 ## Current Limitations
 
 - cut/interface velocity Neumann and periodic BCs are not implemented,

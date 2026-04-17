@@ -61,7 +61,7 @@ function run_mesh_convergence(; scheme=:BE, nlevels=(17, 33, 65), tf=0.02, cdt=1
             force1=(fx, 0.0), force2=(fx, 0.0),
             interface_jump=(0.0, 0.0),
             interface_force=(0.0, 0.0),
-            gauge=MeanPressureGauge(),
+            gauge=PinPressureGauge(),
         )
 
         x = zeros(Float64, last(model.layout.pomega2))
