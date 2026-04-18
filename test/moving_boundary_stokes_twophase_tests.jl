@@ -113,7 +113,8 @@ end
     @test !isempty(iface_active)
     @test maximum(abs.((ug1x[iface_active] .- ug2x[iface_active]) .- Uj)) < 1e-11
     @test maximum(abs.(ug1y[iface_active] .- ug2y[iface_active])) < 1e-11
-    @test moving2_divergence_inf(model, sys.x) < 1e-1
+    div_rows = vcat(collect(model.layout.pomega1), collect(model.layout.pomega2))
+    @test norm((sys.A * sys.x - sys.b)[div_rows], Inf) < 1e-10
 end
 
 @testset "Moving two-phase: no-interface rows masked (2D)" begin

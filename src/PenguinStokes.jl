@@ -1066,9 +1066,13 @@ function _stokes_row_activity(model::MovingStokesModelTwoPhase{N,T}, A::SparseMa
         end
     end
 
-    # Deactivate pressure cells below the small-cell volume threshold.
+    # Deactivate pressure cells below the small-cell volume threshold.  Moving
+    # two-phase CN is especially sensitive to partially activated slab-pressure
+    # islands: they create pressure-dominated near-null modes and amplify trace
+    # truncation error.  Keep this cutoff conservative unless the pressure
+    # block is stabilized/scaled consistently with the time-integrated rows.
     h = minimum(meshsize(model.gridp))
-    eps_cut = convert(T, 1e-3)
+    eps_cut = convert(T, 2e-3)
     min_vol = eps_cut * h^N
     li = LinearIndices(cap_p1_slab.nnodes)
 

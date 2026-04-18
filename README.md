@@ -151,7 +151,7 @@ Developer probe scripts (retained intentionally):
 | Static Drop Spurious Current | Laplace jump test | ok |
 | No Interface moving MMS | 2nd order convergence | ok |
 | Moving Mono | 2nd order convergence | ok |
-| Moving Two-Phase | 2nd order convergence | (BE ok / CN still one tiny blow up at n=25 maybe due to geometry limiting case) |
+| Moving Two-Phase | 2nd order convergence | (BE ok / CN ok but pressure cell deactivation threshold must be adjusted) |
 
 ## Current Limitations
 
