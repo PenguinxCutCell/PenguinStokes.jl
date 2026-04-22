@@ -157,7 +157,7 @@ julia --project=. test/dev_traction_box_probe.jl
 | `13/25` moving examples + `moving_boundary_stokes_tests.jl` | Moving mono | slab/end-time moving assembly behavior | stable stepping and expected temporal trends | Implemented |
 | outlet/symmetry testsets + `dev_*` probes | Mono BC algebra | traction/outlet/symmetry row semantics | row-equivalence and sign rules hold | Implemented |
 | `fsi_tests.jl` + `17..23` examples | Rigid-body FSI | split/rotation/strong/3D helper paths | force/torque trends and convergence sanity checks | Implemented |
-| moving two-phase interface | Two-phase moving interface | geometric interface evolution | n/a | Missing |
+| moving two-phase interface | Two-phase moving interface | geometric interface evolution | n/a | Implemented |
 | multi-body/contact FSI | Rigid-body FSI | collisions/contact constraints | n/a | Missing |
 
 ## 10. Notes on Test vs Script Roles

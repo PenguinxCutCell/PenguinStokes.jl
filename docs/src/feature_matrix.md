@@ -15,7 +15,7 @@ Status labels used here:
 | Unsteady monophasic Stokes | Implemented | `assemble_unsteady!`, `solve_unsteady!`; BE/CN/theta paths tested |
 | Moving-boundary monophasic Stokes | Implemented | `MovingStokesModelMono`, `assemble_unsteady_moving!`; tests in `test/moving_boundary_stokes_tests.jl` |
 | Fixed-interface two-phase Stokes | Implemented | `StokesModelTwoPhase`; geometry/traction/profile tests in `test/runtests.jl` and `examples/08..12` |
-| Moving-interface two-phase Stokes | Missing | no two-phase moving-geometry constructor/path in source |
+| Moving-interface two-phase Stokes | Implemented | `MovingStokesModelTwoPhase`; tests in `test/moving_boundary_stokes_twophase_tests.jl` |
 | Rigid-body FSI split coupling | Implemented | `step_fsi!`, `simulate_fsi!`; `test/fsi_tests.jl`, `examples/17..23` |
 | Rigid-body FSI strong coupling | Implemented | `step_fsi_strong!`; strong-coupling testset + `examples/22` |
 | Rotational rigid-body FSI | Partial | 2D rotational path and 3D rotational state updates are present; practical 3D rotation validation is narrower than 2D |

@@ -156,7 +156,6 @@ Developer probe scripts (retained intentionally):
 ## Current Limitations
 
 - cut/interface velocity Neumann and periodic BCs are not implemented,
-- two-phase interface is fixed (no moving-interface two-phase model),
 - FSI is single rigid body only,
 - no rigid-body contact/collision model,
 - no deformable-body coupling model.
