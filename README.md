@@ -35,7 +35,7 @@ Status labels: `Implemented`, `Partial`, `Missing`.
 | FSI | Split rigid-body coupling | Implemented | `step_fsi!`, `simulate_fsi!` |
 | FSI | Strong rigid-body coupling | Implemented | `step_fsi_strong!` |
 | FSI | Rotational rigid-body coupling | Partial | strong 2D coverage; narrower 3D validation |
-| FSI | Multi-body/contact | Missing | single-body scope only |
+| FSI | Multi-body FSI | Implemented | `MultiBodyFSIProblem`, `step_multi_fsi!` — N bodies, shared fluid solve, per-body force partition |
 | BCs (outer velocity) | Dirichlet / Neumann / Periodic | Implemented | component-wise BC path |
 | BCs (outer velocity) | Traction / PressureOutlet / DoNothing | Implemented | side-level Stokes traction overwrite |
 | BCs (outer velocity) | Symmetry | Implemented | side-level free-slip/symmetry overwrite |
@@ -50,7 +50,8 @@ Status labels: `Implemented`, `Partial`, `Missing`.
 - `StokesModelMono`: steady and unsteady monophasic Stokes.
 - `MovingStokesModelMono`: moving embedded boundary with prescribed cut velocity.
 - `StokesModelTwoPhase`: fixed-interface two-phase Stokes.
-- `StokesFSIProblem`: rigid-body FSI wrappers (split and strong coupling).
+- `StokesFSIProblem`: single rigid-body FSI wrappers (split and strong coupling).
+- `MultiBodyFSIProblem`: N rigid bodies sharing one fluid solve; forces partitioned by interface-centroid proximity.
 
 ## Boundary-Condition Families
 
@@ -95,7 +96,8 @@ Implemented rigid-body FSI scope:
 - 2D and 3D rigid states/params,
 - rotational state updates,
 - split coupling (`step_fsi!`) and strong coupling (`step_fsi_strong!`),
-- force/torque from end-time static-model postprocessing.
+- force/torque from end-time static-model postprocessing,
+- **multi-body FSI** (`MultiBodyFSIProblem`, `step_multi_fsi!`): N bodies with shared fluid solve and per-body force extraction by interface-centroid proximity.
 
 ## Quick Start
 
@@ -127,13 +129,25 @@ sys = solve_steady!(model)
 
 Representative scripts:
 
-- `examples/04_mms_convergence.jl` (mono MMS convergence)
-- `examples/06_mms_convergence_embedded_outside_circle.jl` (embedded-interface MMS)
-- `examples/08_two_phase_mms_fixed_interface.jl` (two-phase traction-jump equilibrium)
-- `examples/27_two_phase_static_circle_spurious_current.jl` (static drop spurious-current benchmark; includes simple CairoMakie snapshot + Laplace sweep)
-- `examples/09_two_phase_planar_couette.jl`, `examples/10_two_phase_planar_poiseuille.jl`, `examples/10_bis_two_phase_planar_couette_poiseuille.jl`
-- `examples/13_unsteady_moving_body_translation.jl`, `examples/25_moving_mms_time_schemes.jl`
-- `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl` (FSI split vs strong)
+- `examples/04_mms_convergence.jl` — mono MMS, 2nd-order convergence
+- `examples/06_mms_convergence_embedded_outside_circle.jl` — embedded-interface MMS
+- `examples/08_two_phase_mms_fixed_interface.jl` — two-phase traction-jump equilibrium
+- `examples/27_two_phase_static_circle_spurious_current.jl` — static drop spurious-current benchmark
+- `examples/09_two_phase_planar_couette.jl`, `10_two_phase_planar_poiseuille.jl`, `10_bis_two_phase_planar_couette_poiseuille.jl`
+- `examples/13_unsteady_moving_body_translation.jl`, `25_moving_mms_time_schemes.jl`
+- `examples/22_3d_falling_rigid_sphere_split_vs_strong.jl` — FSI split vs strong coupling
+
+Physical benchmarks (Basilisk-inspired):
+
+- `examples/31_periodic_cylinder_array.jl` — 2D periodic cylinder array; permeability vs Hasimoto (1959); 1.5–6% error at n=65 (φ=0.1–0.3)
+- `examples/32_periodic_sphere_array.jl` — 3D periodic sphere array; permeability vs Hasimoto; 4–10% error at n=17
+- `examples/33_couette_rotating_cylinders.jl` — Couette flow between rotating cylinders; 2nd-order convergence to analytic u_θ; L2=5×10⁻³ at n=128
+- `examples/34_moving_cylinder_uniform_flow.jl` — cylinder moving at uniform flow speed; velocity error at machine precision (~7×10⁻¹⁵); validates moving-boundary implementation
+- `examples/35_sphere_torque_couette.jl` — torque on fixed sphere in 3D Couette shear; vs Stokes formula T=8πμR³(γ̇/2); 3.6% error at n=33 (4 pts/d)
+- `examples/36_sphere_towards_wall.jl` — sphere approaching a plane wall; vs Brenner (1961) / Cooley & O'Neill (1969); error halves with each grid doubling, approaching 2nd order
+- `examples/37_fsi_cylinder_shear_flow_rotation.jl` — cylinder freely rotating in 2D shear (FSI); ω_∞ = −γ̇/2 exact for Stokes; 2.2% error at n=65 (Re_d=0.4)
+- `examples/38_fsi_ballistic_sphere.jl` — 3D ballistic sphere (initial transverse velocity + gravity); Stokes limit (Re_d≈0.012); exponential velocity decay vs analytic
+- `examples/39_two_spheres_couette.jl` — two spheres in 3D Couette shear (multi-body FSI); hydrodynamic approach orbit; exercises `MultiBodyFSIProblem`
 
 Developer probe scripts (retained intentionally):
 
@@ -156,6 +170,5 @@ Developer probe scripts (retained intentionally):
 ## Current Limitations
 
 - cut/interface velocity Neumann and periodic BCs are not implemented,
-- FSI is single rigid body only,
-- no rigid-body contact/collision model,
+- no rigid-body contact/collision model (lubrication correction not implemented; requires sufficient mesh resolution to resolve gaps),
 - no deformable-body coupling model.
