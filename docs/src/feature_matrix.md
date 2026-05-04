@@ -16,10 +16,10 @@ Status labels used here:
 | Moving-boundary monophasic Stokes | Implemented | `MovingStokesModelMono`, `assemble_unsteady_moving!`; tests in `test/moving_boundary_stokes_tests.jl` |
 | Fixed-interface two-phase Stokes | Implemented | `StokesModelTwoPhase`; geometry/traction/profile tests in `test/runtests.jl` and `examples/08..12` |
 | Moving-interface two-phase Stokes | Implemented | `MovingStokesModelTwoPhase`; tests in `test/moving_boundary_stokes_twophase_tests.jl` |
-| Rigid-body FSI split coupling | Implemented | `step_fsi!`, `simulate_fsi!`; `test/fsi_tests.jl`, `examples/17..23` |
+| Rigid-body FSI split coupling | Implemented | `step_fsi!`, `simulate_fsi!`; `test/fsi_tests.jl`, `examples/17..23`, `examples/35..38` |
 | Rigid-body FSI strong coupling | Implemented | `step_fsi_strong!`; strong-coupling testset + `examples/22` |
 | Rotational rigid-body FSI | Partial | 2D rotational path and 3D rotational state updates are present; practical 3D rotation validation is narrower than 2D |
-| Multi-body FSI | Missing | single-body wrapper design |
+| Multi-body FSI | Implemented | `MultiBodyFSIProblem`, `step_multi_fsi!`; shared fluid solve + per-body force partition via interface-centroid proximity; `examples/39` |
 | Deformable-body FSI | Missing | rigid-body-only scope |
 
 ## 2. Dimensionality
@@ -79,10 +79,16 @@ Status labels used here:
 | Planar Poiseuille (two-phase) | Implemented | `examples/10`, testset in `runtests.jl` |
 | Planar Couette-Poiseuille (two-phase) | Implemented | `examples/10_bis` |
 | Oscillatory Couette (two-phase) | Implemented | `examples/11` |
-| Moving-body verification | Implemented | `examples/13/14/25` + moving tests |
+| Moving-body verification | Implemented | `examples/13/14/25/34` + moving tests |
 | Drag/force verification | Implemented | postprocessing tests + `examples/12/21` |
 | FSI split vs strong comparison | Implemented | `examples/22`, strong-coupling testset |
-| 3D sphere runs | Implemented | `examples/07/21/22` |
+| 3D sphere runs | Implemented | `examples/07/21/22/32/35/36/38/39` |
+| Periodic arrays (hydrodynamic interaction) | Implemented | `examples/31/32` with Hasimoto permeability comparison |
+| Fixed-body torque in shear flow | Implemented | `examples/35`, Stokes formula validation |
+| Lubrication / sphere-wall interaction | Implemented | `examples/36`, Brenner/Cooley & O'Neill κ correction |
+| FSI rotation in shear flow | Implemented | `examples/37`, Stokes limit ω_∞ validation |
+| Ballistic FSI trajectory | Implemented | `examples/38`, Stokes drag + gravity decay rates |
+| Multi-body FSI hydrodynamic interaction | Implemented | `examples/39`, reversible orbit / approach dynamics |
 
 ## 7. Documentation Coverage (This PR)
 
@@ -100,6 +106,7 @@ Status labels used here:
 ## Known Gaps / Next Steps
 
 1. Add broader 3D regression coverage for two-phase and rotational FSI paths.
-2. Add dedicated multi-body/contact/deformable-body roadmap docs when relevant.
+2. Multi-body contact collision detection (currently: no overlap, rely on mesh resolution).
 3. If two-phase moving interface is added, expand matrix and examples accordingly.
 4. Add optional postprocessing utilities for two-phase models if needed.
+5. Strong coupling for multi-body FSI (currently split coupling only).

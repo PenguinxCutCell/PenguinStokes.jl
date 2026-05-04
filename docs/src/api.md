@@ -66,21 +66,23 @@ Current scope: `StokesModelMono`.
 
 ## 6. Rigid-Body and FSI APIs
 
-Rigid-body primitives:
-
+### Rigid-Body Primitives
 - states: `RigidBodyState`, `RigidBodyState2D`, `RigidBodyState3D`
 - parameters: `RigidBodyParams`, `RigidBodyParams2D`, `RigidBodyParams3D`
 - shapes: `Circle`, `Sphere`, `Ellipse`, `Ellipsoid`
 
-FSI wrappers/steppers:
-
+### Single-Body FSI Wrappers/Steppers
 - `StokesFSIProblem`, `StokesFSIProblem2D`
 - `endtime_static_model`
 - `step_fsi!`, `step_fsi_rotation!`, `step_fsi_strong!`
 - `simulate_fsi!`, `simulate_fsi_rotation!`
 
-Rigid-motion helper callbacks:
+### Multi-Body FSI
+- `MultiBodyFSIProblem`: N-body FSI with shared fluid solve and per-body force partition
+- `step_multi_fsi!`: advance one time step of multi-body FSI
+- `multi_body_levelset`, `multi_body_cut_bc_tuple`: union level-set and BC dispatcher
 
+### Rigid-Motion Helper Callbacks
 - `rigid_boundary_velocity`, `rigid_velocity_2d`, `rigid_velocity`
 - `rigid_body_levelset`, `rigid_cut_bc_tuple`, `rigid_cut_bc_tuple_2d`
 
@@ -136,4 +138,8 @@ PenguinStokes.step_fsi_rotation!
 PenguinStokes.step_fsi_strong!
 PenguinStokes.simulate_fsi!
 PenguinStokes.simulate_fsi_rotation!
+PenguinStokes.MultiBodyFSIProblem
+PenguinStokes.step_multi_fsi!
+PenguinStokes.multi_body_levelset
+PenguinStokes.multi_body_cut_bc_tuple
 ```
