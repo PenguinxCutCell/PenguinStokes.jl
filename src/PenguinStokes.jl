@@ -24,6 +24,7 @@ export rigid_boundary_velocity, rigid_velocity_2d, rigid_velocity
 export rigid_cut_bc_tuple, rigid_cut_bc_tuple_2d, rigid_body_levelset
 export StokesFSIProblem, StokesFSIProblem2D
 export endtime_static_model, step_fsi!, simulate_fsi!, step_fsi_rotation!, simulate_fsi_rotation!, step_fsi_strong!
+export MultiBodyFSIProblem, step_multi_fsi!, multi_body_levelset, multi_body_cut_bc_tuple
 
 """
     AbstractPressureGauge
@@ -5280,5 +5281,6 @@ include("orientation.jl")
 include("rigidbody.jl")
 include("fsi.jl")
 include("fsi_strong_coupling.jl")
+include("fsi_multibody.jl")
 
 end
