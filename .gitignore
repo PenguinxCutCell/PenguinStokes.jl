@@ -3,6 +3,5 @@ docs/Manifest.toml
 docs/build
 *.png
 *.csv
-AGENTS.md
 RESIDUAL_ADVECTION.md
 FRONT_TRACKING_GCL_ADVECTION.md
