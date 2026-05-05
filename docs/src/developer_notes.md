@@ -2,6 +2,28 @@
 
 This page is maintainer-oriented and summarizes key implementation conventions.
 
+## 0. Source Layout
+
+The main logic is split across `src/`:
+
+| File | Contents |
+|---|---|
+| `types.jl` | Pressure gauge types, layout structs, all model structs |
+| `validation.jl` | BC normalization, `_validate_stokes_*`, `staggered_velocity_grids` |
+| `force.jl` | `_force_values`, `_interface_force_*` |
+| `activity.jl` | Cell/row activity masks, `_prune_uncoupled_active!`, sparse-insert helpers |
+| `bc_velocity.jl` | Row identity constraints, Dirichlet/traction/symmetry/velocity box BC application |
+| `bc_pressure.jl` | Pressure box BCs, pin/mean pressure gauge application |
+| `moving_geometry.jl` | Scheme parameters, `_build_moving_slab!`, `reduce_slab_to_space`, `_expand_prev_state` |
+| `assembly.jl` | `_stokes_blocks`, `_assemble_core!`, interface traction/auxiliary trace rows, `assemble_*`, `solve_*` |
+| `analysis.jl` | Equilibrium builders, residual diagnostics, `embedded_boundary_*`, `integrated_embedded_force` |
+| `constructors.jl` | All model constructors |
+| `rigidbody.jl` | Rigid-body state/params/shapes |
+| `fsi.jl` | Split FSI coupling |
+| `fsi_strong_coupling.jl` | Strong FSI coupling |
+| `fsi_multibody.jl` | Multi-body FSI |
+| `orientation.jl` | Rotation/quaternion utilities |
+
 ## 1. Layout and Block Conventions
 
 Monophasic layout (`StokesLayout`):
@@ -33,6 +55,7 @@ This simplifies:
 
 Activity is derived from capacity support (`V`, `Gamma`) and coupling checks.
 For moving cases, activity is evaluated on end-time capacities/operators.
+All activity logic lives in `src/activity.jl`.
 
 Row masks are then applied before solving.
 

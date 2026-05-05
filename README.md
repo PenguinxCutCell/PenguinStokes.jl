@@ -31,7 +31,7 @@ Status labels: `Implemented`, `Partial`, `Missing`.
 | Models | Unsteady monophasic Stokes | Implemented | `assemble_unsteady!` (`:BE`, `:CN`, numeric `theta`) |
 | Models | Moving-boundary monophasic Stokes | Implemented | `MovingStokesModelMono`, `assemble_unsteady_moving!` |
 | Models | Fixed-interface two-phase Stokes | Implemented | `StokesModelTwoPhase` with shared `ugamma` traction rows |
-| Models | Moving-interface two-phase Stokes | Missing | no moving-interface two-phase constructor/path |
+| Models | Moving-interface two-phase Stokes | Partial | `MovingStokesModelTwoPhase` + `assemble_unsteady_moving!` exist; BE stable, CN n=25 geometry outlier (near-null algebraic mode) under investigation |
 | FSI | Split rigid-body coupling | Implemented | `step_fsi!`, `simulate_fsi!` |
 | FSI | Strong rigid-body coupling | Implemented | `step_fsi_strong!` |
 | FSI | Rotational rigid-body coupling | Partial | strong 2D coverage; narrower 3D validation |
@@ -50,6 +50,7 @@ Status labels: `Implemented`, `Partial`, `Missing`.
 - `StokesModelMono`: steady and unsteady monophasic Stokes.
 - `MovingStokesModelMono`: moving embedded boundary with prescribed cut velocity.
 - `StokesModelTwoPhase`: fixed-interface two-phase Stokes.
+- `MovingStokesModelTwoPhase`: moving-interface two-phase Stokes (prescribed interface motion; BE stable, CN under active development).
 - `StokesFSIProblem`: single rigid-body FSI wrappers (split and strong coupling).
 - `MultiBodyFSIProblem`: N rigid bodies sharing one fluid solve; forces partitioned by interface-centroid proximity.
 

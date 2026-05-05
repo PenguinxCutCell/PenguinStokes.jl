@@ -13,10 +13,22 @@ PenguinStokes.jl implements cut-cell finite-volume Stokes solvers on staggered M
 - Moving two-phase flow (prescribed interface motion)
 - Fluid-structure interaction (FSI) with rigid bodies
 
-All source is in `src/PenguinStokes.jl` (~5200 lines), plus:
+Source is split across `src/`:
+- `src/PenguinStokes.jl` — module header, `using`, `export`, and `include` calls only
+- `src/types.jl` — pressure gauge types, layout structs (`StokesLayout`, `StokesLayoutTwoPhase`), all model structs
+- `src/validation.jl` — BC normalization helpers, `_validate_stokes_*`, `staggered_velocity_grids`, `_side_pairs`
+- `src/force.jl` — `_force_values`, `_interface_force_component/vector` overloads
+- `src/activity.jl` — `_cell_activity_masks`, `_pressure_activity`, `_stokes_row_activity`, `_prune_uncoupled_active!`, sparse-insert helpers
+- `src/bc_velocity.jl` — `_apply_row_identity_constraints!`, `_enforce_dirichlet!`, all traction/symmetry/velocity box BC application
+- `src/bc_pressure.jl` — `_apply_pressure_box_bc!`, `_apply_pressure_gauge!`, `_apply_pin_pressure_gauge!`, `_apply_mean_pressure_gauge!`
+- `src/moving_geometry.jl` — `_theta_from_scheme`, `_psi_functions`, `_build_moving_slab!`, `reduce_slab_to_space`, `_expand_prev_state`
+- `src/assembly.jl` — `_stokes_blocks`, `_assemble_core!`, `_assemble_interface_traction_rows!`, `_apply_auxiliary_trace_rows!`, `assemble_steady!`, `assemble_unsteady!`, `assemble_unsteady_moving!`, all `solve_*` functions
+- `src/analysis.jl` — `build_static_circle_equilibrium_state`, residual/pressure diagnostics, `embedded_boundary_*`, `integrated_embedded_force`
+- `src/constructors.jl` — `StokesModelMono`, `MovingStokesModelMono`, `StokesModelTwoPhase`, `MovingStokesModelTwoPhase` constructors
 - `src/rigidbody.jl` — rigid body state/params/shapes for FSI
 - `src/fsi.jl` — FSI problem wrapper and split coupling
 - `src/fsi_strong_coupling.jl` — strong (monolithic) FSI coupling
+- `src/fsi_multibody.jl` — multi-body FSI (`MultiBodyFSIProblem`, `step_multi_fsi!`)
 - `src/orientation.jl` — rotation/quaternion utilities
 
 ---
@@ -311,7 +323,7 @@ has_gamma = (agamma1[i] || agamma2[i]) && agamma_p[i]
 
 where `agamma1/agamma2` are velocity-grid interface masks, but `agamma_p` is the pressure-grid interface mask at the same linear index. Because MAC velocity grids are staggered by `h/2`, a velocity trace DOF can be required by an active traction stencil even when the pressure cell at the same index has no interface. Those trace columns were zeroed, breaking constant preservation.
 
-Implemented change in `src/PenguinStokes.jl`:
+Implemented change in `src/activity.jl` (row activity) and `src/assembly.jl` (auxiliary trace rows):
 
 - Moving two-phase `ugamma` activity now keeps velocity-grid trace DOFs active when the velocity cut mask is active and there is a local bulk reference.
 - Added `_apply_auxiliary_trace_rows!` for moving two-phase. For velocity-grid trace DOFs that are required by velocity stencils but do not have a pressure-grid traction row, it replaces the `ugamma1` row with a volume-weighted trace-extension equation tying `ugamma1[d][i]` to local active bulk velocities. The existing `ugamma2` jump row still enforces `ugamma1 = ugamma2`.
