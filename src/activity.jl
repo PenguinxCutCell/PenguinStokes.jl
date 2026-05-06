@@ -230,8 +230,14 @@ end
 
 function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrixCSC{T,Int}) where {N,T}
     isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
+    isnothing(model.cap_u_slab) && throw(ArgumentError("moving model velocity slab-capacity cache is not built"))
+    isnothing(model.Vun) && throw(ArgumentError("moving model previous velocity-volume cache is not built"))
+    isnothing(model.Vun1) && throw(ArgumentError("moving model end velocity-volume cache is not built"))
     isnothing(model.cap_p_slab) && throw(ArgumentError("moving model pressure slab-capacity cache is not built"))
     cap_u_end = something(model.cap_u_end)
+    cap_u_slab = something(model.cap_u_slab)
+    Vun = something(model.Vun)
+    Vun1 = something(model.Vun1)
     # Use the slab pressure capacity for activity: a pressure cell is active when it had
     # nonzero fluid volume during the time step [t, t+dt].  Cells that existed only at
     # the start time (V_end=0 but V_slab>0) still carry a valid incompressibility
@@ -242,10 +248,13 @@ function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrix
     layout = model.layout
     active = falses(nunknowns(layout))
     @inbounds for d in 1:N
-        aomega, agamma = _cell_activity_masks(cap_u_end[d])
+        aomega_end, agamma_end = _cell_activity_masks(cap_u_end[d])
+        aomega_slab, agamma_slab = _cell_activity_masks(cap_u_slab[d])
         for i in 1:cap_u_end[d].ntotal
-            active[layout.uomega[d][i]] = aomega[i]
-            active[layout.ugamma[d][i]] = agamma[i]
+            active[layout.uomega[d][i]] = aomega_end[i] || aomega_slab[i]
+            vdelta = abs(Vun1[d][i] - Vun[d][i])
+            volume_changed = isfinite(vdelta) && vdelta > sqrt(eps(T)) * max(one(T), abs(Vun[d][i]), abs(Vun1[d][i]))
+            active[layout.ugamma[d][i]] = agamma_end[i] || agamma_slab[i] || volume_changed
         end
     end
 
@@ -290,6 +299,27 @@ function _stokes_row_activity(model::MovingStokesModelMono{N,T}, A::SparseMatrix
     @inbounds for i in 1:cap_p_slab.ntotal
         active[layout.pomega[i]] = pactive[i]
     end
+
+    # The moving pressure-slab divergence can reference trace columns that are
+    # not cut at the same velocity-grid index at t^{n+1}.  Keep every trace
+    # column that is actually used by an active equation; otherwise column
+    # pruning destroys the constant-velocity cancellation in the slab operator.
+    @inbounds for d in 1:N
+        for i in 1:cap_u_end[d].ntotal
+            col = layout.ugamma[d][i]
+            active[col] && continue
+            coupled = false
+            for ptr in nzrange(A, col)
+                row = A.rowval[ptr]
+                if active[row] && A.nzval[ptr] != zero(T)
+                    coupled = true
+                    break
+                end
+            end
+            active[col] = coupled
+        end
+    end
+
     return _prune_uncoupled_active!(active, A)
 end
 

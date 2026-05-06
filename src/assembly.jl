@@ -739,6 +739,43 @@ function assemble_unsteady!(
     return sys
 end
 
+function _apply_inactive_moving_velocity_extension!(
+    b::Vector{T},
+    model::MovingStokesModelMono{N,T},
+    active_rows::BitVector,
+    t::T,
+) where {N,T}
+    isnothing(model.cap_u_end) && throw(ArgumentError("moving model velocity end-capacity cache is not built"))
+    cap_u_end = something(model.cap_u_end)
+    layout = model.layout
+
+    @inbounds for d in 1:N
+        bc_cut = model.bc_cut_u[d]
+        bc_cut isa Dirichlet ||
+            throw(ArgumentError("cut-cell velocity condition currently supports Dirichlet only"))
+        capd = cap_u_end[d]
+        for i in 1:capd.ntotal
+            row_omega = layout.uomega[d][i]
+            xω = capd.C_ω[i]
+            if !active_rows[row_omega] && all(isfinite, xω)
+                b[row_omega] = convert(T, eval_bc(bc_cut.value, xω, t))
+            end
+
+            row_gamma = layout.ugamma[d][i]
+            if !active_rows[row_gamma]
+                xγ = capd.C_γ[i]
+                if all(isfinite, xγ)
+                    b[row_gamma] = convert(T, eval_bc(bc_cut.value, xγ, t))
+                elseif all(isfinite, xω)
+                    b[row_gamma] = convert(T, eval_bc(bc_cut.value, xω, t))
+                end
+            end
+        end
+    end
+
+    return b
+end
+
 """
     assemble_unsteady_moving!(sys, model, x_prev, t, dt; scheme=:CN)
 
@@ -872,6 +909,7 @@ function assemble_unsteady_moving!(
 
     active_rows = _stokes_row_activity(model, A)
     A, b = _apply_row_identity_constraints!(A, b, active_rows)
+    _apply_inactive_moving_velocity_extension!(b, model, active_rows, t_next)
 
     sys.A = A
     sys.b = b

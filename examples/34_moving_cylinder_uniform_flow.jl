@@ -65,10 +65,11 @@ function main()
     xprev = zeros(Float64, nsys)
     # Initialise to the exact solution.
     xprev[model.layout.uomega[1]] .= UREF
+    xprev[model.layout.ugamma[1]] .= UREF
 
     tref  = (2 * RADIUS) / UREF   # d / U
     dt    = 0.01 * tref
-    t_end = 2.0 * tref
+    t_end = 0.2 * tref
     nsteps = ceil(Int, t_end / dt)
     dt = t_end / nsteps
 

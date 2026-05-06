@@ -118,6 +118,53 @@ end
     @test moving_divergence_inf(model, sys.x) < 5e-2
 end
 
+@testset "Moving one-phase: uniform moving body preserves constant flow (2D)" begin
+    U = 0.25
+    R = 0.18
+    xc0 = 0.5
+    yc = 0.5
+    body(x, y, t) = R - sqrt((x - (xc0 + U * t))^2 + (y - yc)^2)
+
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (21, 21))
+    bc = moving_periodic_2d()
+    model = MovingStokesModelMono(
+        grid,
+        body,
+        1.0,
+        1.0;
+        bc_u=(bc, bc),
+        force=(0.0, 0.0),
+        bc_cut_u=(Dirichlet(U), Dirichlet(0.0)),
+    )
+
+    x = zeros(Float64, last(model.layout.pomega))
+    x[model.layout.uomega[1]] .= U
+    x[model.layout.ugamma[1]] .= U
+
+    t = 0.0
+    dt = 0.02
+    for _ in 1:2
+        sys = solve_unsteady_moving!(model, x; t=t, dt=dt, scheme=:CN)
+        x .= sys.x
+        t += dt
+    end
+
+    cap_u_end = something(model.cap_u_end)
+    err = 0.0
+    @inbounds for d in 1:2
+        target = d == 1 ? U : 0.0
+        ud = x[model.layout.uomega[d]]
+        capd = cap_u_end[d]
+        for i in 1:capd.ntotal
+            V = capd.buf.V[i]
+            if isfinite(V) && V > 0.0
+                err = max(err, abs(ud[i] - target))
+            end
+        end
+    end
+    @test err < 1e-9
+end
+
 @testset "Moving one-phase: no-interface rows masked (2D)" begin
     grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
     bc = moving_periodic_2d()
