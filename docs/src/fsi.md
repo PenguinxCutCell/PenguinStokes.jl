@@ -180,3 +180,98 @@ fsi = MultiBodyFSIProblem(model, states, params, shapes; pressure_reconstruction
 out = step_multi_fsi!(fsi; t=0.0, dt=0.01, fluid_scheme=:CN, ode_scheme=:symplectic_euler)
 # out.states contains per-body ODE results; out.forces contains per-body force/torque
 ```
+
+---
+
+## Rigid-Body Contact
+
+`PenguinStokes.jl` provides a soft normal spring-dashpot contact model that
+adds contact forces to the rigid-body ODE right-hand side.  It does **not**
+modify the Stokes fluid assembly.
+
+### Contact model
+
+The contact model is `NormalSpringDashpotContact` (Kelvin-Voigt):
+
+For a gap `g` and contact threshold `gap_tol`:
+
+```
+δ = max(gap_tol - g, 0)
+Fn = max(0, k_n * δ - c_n * vn)
+F_contact = Fn * n
+```
+
+where `vn = dot(V, n)` is the normal velocity component.
+
+**Key property**: `Fn >= 0` always — the force can push, never pull.
+
+#### Wall contact
+
+```
+g_wall = dot(X - xw, n) - R
+F_wall = max(0, k_n * max(gap_tol - g_wall, 0) - c_n * dot(V, n)) * n
+```
+
+#### Particle-particle contact (circle/sphere only)
+
+```
+g_ij = norm(Xj - Xi) - Ri - Rj
+vn   = dot(Vj - Vi, nij)       # positive = separating
+Fn   = max(0, k_n * max(gap_tol - g_ij, 0) - c_n * vn)
+Fi   = -Fn * nij               # force on body i
+Fj   = +Fn * nij               # force on body j  (Fi + Fj = 0)
+```
+
+### Timestep restriction
+
+For explicit contact integration:
+
+```
+dt <= 0.1 * sqrt(m_eff / k_n)
+```
+
+where:
+- wall contact: `m_eff = m`
+- pair contact: `m_eff = mi * mj / (mi + mj)`
+
+If `dt` is too large, reduce `k_n`, increase `c_n`, or decrease `dt`.
+
+### Usage
+
+```julia
+contact_model = NormalSpringDashpotContact(
+    stiffness       = 1e5,
+    damping         = 50.0,
+    gap_tol         = 0.0,
+    projection_tol  = 1e-6,
+    enable_projection = true,
+)
+
+# Wall-only (single body)
+contact_constraints = (box_contacts_from_grid(grid),)
+out = step_fsi!(fsi; t=t, dt=dt,
+                contact_model=contact_model,
+                contact_constraints=contact_constraints)
+
+# Wall + pairwise (multi-body)
+contact_constraints = (
+    box_contacts_from_grid(grid),
+    PairwiseParticleContact(nothing),   # all pairs
+)
+out = step_multi_fsi!(fsi; t=t, dt=dt,
+                      contact_model=contact_model,
+                      contact_constraints=contact_constraints)
+```
+
+The returned `out.contact` NamedTuple contains:
+- `active`    — whether any contact is active
+- `ncontacts` — number of active wall contacts
+- `min_gap`   — minimum gap over all walls
+- `force`     (single body) or `forces` (multi-body) — contact force(s)
+
+### Not yet implemented
+
+- Lubrication corrections
+- Dry friction (tangential contact)
+- Exact hard-sphere event-time collision
+- Non-spherical particle-particle contact (ellipses/ellipsoids)

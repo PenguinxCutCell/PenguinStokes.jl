@@ -269,6 +269,8 @@ function step_multi_fsi!(
     dt::T,
     fluid_scheme::Symbol=:CN,
     ode_scheme::Symbol=:symplectic_euler,
+    contact_model=nothing,
+    contact_constraints=(),
 ) where {Nbodies,N,T}
     dt > zero(T) || throw(ArgumentError("dt must be positive"))
 
@@ -285,16 +287,26 @@ function step_multi_fsi!(
     sm    = endtime_static_model(fsi.model)
     per_body = _per_body_forces(fsi, sm, sys, statefuns, convert(T, tnext))
 
-    # 4. Advance each rigid body.
+    # 4. Compute wall contact forces for each body.
+    wall_contact_forces = [
+        contact_force(fsi.states[k], fsi.params[k], contact_constraints, contact_model)
+        for k in 1:Nbodies
+    ]
+
+    # 5. Compute pairwise particle contact forces.
+    pair_forces = _compute_pairwise_contact(fsi.states, fsi.params, contact_constraints, contact_model)
+
+    # 6. Advance each rigid body with total force.
     ode_results = Vector{Any}(undef, Nbodies)
     for k in 1:Nbodies
-        q_k      = per_body[k]
-        Fhydro_k = convert(T, fsi.force_signs[k]) * _extract_force(q_k, Val(N), T)
+        q_k         = per_body[k]
+        Fhydro_k    = convert(T, fsi.force_signs[k]) * _extract_force(q_k, Val(N), T)
         tau_hydro_k = _extract_torque_hydro(fsi.states[k], q_k, fsi.torque_signs[k], T)
+        Fcontact_k  = wall_contact_forces[k].force + pair_forces[k]
         ode_results[k] = _advance_state!(
             fsi.states[k],
             fsi.params[k],
-            Fhydro_k,
+            Fhydro_k + Fcontact_k,
             tau_hydro_k,
             dt;
             t=t,
@@ -302,7 +314,45 @@ function step_multi_fsi!(
         )
     end
 
+    # 7. Apply positional projection (wall then pairwise).
+    apply_contact_projection!(fsi.states, fsi.params, contact_constraints, contact_model)
+
     fsi.xprev .= sys.x
 
-    return (sys=sys, t=tnext, states=ode_results, forces=per_body)
+    # Aggregate contact diagnostics.
+    any_active = any(w.active for w in wall_contact_forces) || any(!iszero(f) for f in pair_forces)
+    total_contacts = sum(w.ncontacts for w in wall_contact_forces)
+    all_gaps = [w.min_gap for w in wall_contact_forces]
+    min_gap_all = isempty(all_gaps) ? typemax(T) : minimum(all_gaps)
+    contact_forces_vec = [
+        SVector{N,T}(wall_contact_forces[k].force + pair_forces[k])
+        for k in 1:Nbodies
+    ]
+    contact_diag = (
+        active    = any_active,
+        ncontacts = total_contacts,
+        min_gap   = min_gap_all,
+        forces    = contact_forces_vec,
+    )
+
+    return (sys=sys, t=tnext, states=ode_results, forces=per_body, contact=contact_diag)
+end
+
+function _compute_pairwise_contact(states, params, contact_constraints, contact_model)
+    Nbodies = length(states)
+    T = eltype(state_position(states[1]))
+    N = length(state_position(states[1]))
+    result = [zero(SVector{N,T}) for _ in 1:Nbodies]
+
+    contact_model === nothing && return result
+
+    for c in contact_constraints
+        if c isa PairwiseParticleContact
+            pf = pairwise_contact_forces(states, params, c, contact_model)
+            for k in 1:Nbodies
+                result[k] += pf[k].force
+            end
+        end
+    end
+    return result
 end

@@ -76,6 +76,8 @@ function step_fsi_strong!(
     omega_relax::Real=0.8,
     verbose::Bool=false,
     allow_nonconverged::Bool=false,
+    contact_model=nothing,
+    contact_constraints=(),
 ) where {N,T}
     dt > zero(T) || throw(ArgumentError("dt must be positive"))
     maxiter >= 1 || throw(ArgumentError("maxiter must be >= 1"))
@@ -120,16 +122,23 @@ function step_fsi_strong!(
         Fhydro = convert(T, fsi.force_sign) * _extract_force(q, Val(N), T)
         tau_hydro = _extract_torque_hydro(state_guess, q, fsi.torque_sign, T)
 
+        # Contact force evaluated at current guess state.
+        cinfo = contact_force(state_guess, fsi.params, contact_constraints, contact_model)
+        Fhydro_total = Fhydro + cinfo.force
+
         state_tilde = state_copy(state_n)
         ode = _advance_state!(
             state_tilde,
             fsi.params,
-            Fhydro,
+            Fhydro_total,
             tau_hydro,
             dt;
             t=t,
             ode_scheme=ode_scheme,
         )
+
+        # Apply projection to candidate state before computing residual.
+        apply_contact_projection!(state_tilde, fsi.params, contact_constraints, contact_model)
 
         vec_tilde = _state_vector(state_tilde)
         r_curr = vec_tilde - vec_guess
@@ -179,8 +188,18 @@ function step_fsi_strong!(
     fsi.state = state_guess
     fsi.xprev .= sys_last.x
 
+    # Final contact info at converged state.
+    cinfo_final = contact_force(fsi.state, fsi.params, contact_constraints, contact_model)
+    contact_diag = (
+        active    = cinfo_final.active,
+        ncontacts = cinfo_final.ncontacts,
+        min_gap   = cinfo_final.min_gap,
+        force     = cinfo_final.force,
+    )
+
     out = merge(
-        (sys=sys_last, force=q_last, t=tnext, iterations=nit, converged=converged, coupling_residual=coupled_residual),
+        (sys=sys_last, force=q_last, t=tnext, iterations=nit, converged=converged,
+         coupling_residual=coupled_residual, contact=contact_diag),
         ode_last,
     )
 

@@ -316,9 +316,16 @@ function _solve_fluid_for_statefun!(
 end
 
 """
-    step_fsi!(fsi; t, dt, fluid_scheme=:CN, ode_scheme=:symplectic_euler)
+    step_fsi!(fsi; t, dt, fluid_scheme=:CN, ode_scheme=:symplectic_euler,
+              contact_model=nothing, contact_constraints=())
 
 Advance one rigid-body FSI step with one-pass split coupling.
+
+Optional keyword arguments:
+- `contact_model`       — `NormalSpringDashpotContact` or `nothing` (no contact)
+- `contact_constraints` — tuple/vector of `AbstractContactConstraint` objects
+
+When `contact_model === nothing` the behavior is identical to the previous API.
 """
 function step_fsi!(
     fsi::StokesFSIProblem{N,T};
@@ -326,6 +333,8 @@ function step_fsi!(
     dt::T,
     fluid_scheme::Symbol=:CN,
     ode_scheme::Symbol=:symplectic_euler,
+    contact_model=nothing,
+    contact_constraints=(),
 ) where {N,T}
     dt > zero(T) || throw(ArgumentError("dt must be positive"))
 
@@ -347,19 +356,33 @@ function step_fsi!(
     Fhydro = convert(T, fsi.force_sign) * _extract_force(q, Val(N), T)
     tau_hydro = _extract_torque_hydro(fsi.state, q, fsi.torque_sign, T)
 
+    # Contact force (explicit, evaluated at current state before ODE advance).
+    cinfo = contact_force(fsi.state, fsi.params, contact_constraints, contact_model)
+    Fhydro_total = Fhydro + cinfo.force
+
     ode = _advance_state!(
         fsi.state,
         fsi.params,
-        Fhydro,
+        Fhydro_total,
         tau_hydro,
         dt;
         t=t,
         ode_scheme=ode_scheme,
     )
 
+    # Optional positional projection to remove residual penetrations.
+    apply_contact_projection!(fsi.state, fsi.params, contact_constraints, contact_model)
+
     fsi.xprev .= sys.x
 
-    return merge((sys=sys, force=q, t=tnext), ode)
+    contact_diag = (
+        active    = cinfo.active,
+        ncontacts = cinfo.ncontacts,
+        min_gap   = cinfo.min_gap,
+        force     = cinfo.force,
+    )
+
+    return merge((sys=sys, force=q, t=tnext, contact=contact_diag), ode)
 end
 
 """
@@ -387,6 +410,8 @@ function simulate_fsi!(
     fluid_scheme::Symbol=:CN,
     ode_scheme::Symbol=:symplectic_euler,
     callback=nothing,
+    contact_model=nothing,
+    contact_constraints=(),
 ) where {N,T}
     nsteps >= 0 || throw(ArgumentError("nsteps must be nonnegative"))
     dt > zero(T) || throw(ArgumentError("dt must be positive"))
@@ -394,7 +419,8 @@ function simulate_fsi!(
     history = Vector{NamedTuple}(undef, nsteps)
     t = t0
     for step in 1:nsteps
-        out = step_fsi!(fsi; t=t, dt=dt, fluid_scheme=fluid_scheme, ode_scheme=ode_scheme)
+        out = step_fsi!(fsi; t=t, dt=dt, fluid_scheme=fluid_scheme, ode_scheme=ode_scheme,
+                        contact_model=contact_model, contact_constraints=contact_constraints)
         kkeep = Tuple(filter(k -> k != :sys && k != :force && k != :t, keys(out)))
         vkeep = map(k -> getproperty(out, k), kkeep)
         extra = NamedTuple{kkeep}(vkeep)

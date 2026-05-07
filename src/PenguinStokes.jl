@@ -25,6 +25,12 @@ export rigid_cut_bc_tuple, rigid_cut_bc_tuple_2d, rigid_body_levelset
 export StokesFSIProblem, StokesFSIProblem2D
 export endtime_static_model, step_fsi!, simulate_fsi!, step_fsi_rotation!, simulate_fsi_rotation!, step_fsi_strong!
 export MultiBodyFSIProblem, step_multi_fsi!, multi_body_levelset, multi_body_cut_bc_tuple
+export AbstractContactModel, AbstractContactConstraint
+export NormalSpringDashpotContact, contact_from_restitution
+export PlanarWallContact, BoxContact, box_contacts_from_grid
+export PairwiseParticleContact
+export contact_force, wall_contact_force, pairwise_contact_forces
+export apply_contact_projection!
 
 include("types.jl")
 include("validation.jl")
@@ -39,6 +45,7 @@ include("constructors.jl")
 
 include("orientation.jl")
 include("rigidbody.jl")
+include("contact.jl")
 include("fsi.jl")
 include("fsi_strong_coupling.jl")
 include("fsi_multibody.jl")
