@@ -68,12 +68,12 @@ dt = T(5e-4)
 nsteps = 400
 
 println("step  t       X1[1]   X2[1]   V1[1]   V2[1]  |Fc_pair|")
-t = zero(T)
+global t = zero(T)
 for step in 1:nsteps
     out = step_multi_fsi!(fsi; t=t, dt=dt,
                           contact_model=contact_model,
                           contact_constraints=contact_constraints)
-    t = out.t
+    global t = out.t
     if mod(step, 50) == 0
         X1 = fsi.states[1].X
         X2 = fsi.states[2].X
