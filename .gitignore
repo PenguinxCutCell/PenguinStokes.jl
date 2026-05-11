@@ -5,3 +5,7 @@ docs/build
 *.csv
 RESIDUAL_ADVECTION.md
 FRONT_TRACKING_GCL_ADVECTION.md
+presentation.qmd
+presentation.html
+/presentation_files
+*.log
