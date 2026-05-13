@@ -115,7 +115,6 @@ function step_fsi_strong!(
         q = integrated_embedded_force(
             sm,
             sys;
-            pressure_reconstruction=fsi.pressure_reconstruction,
             x0=Tuple(state_position(sref)),
         )
 

@@ -138,19 +138,19 @@ function main()
     println("Mesh sweep uses dt≈0.5*h^2 with exact t_f hit by dt=t_f/nsteps")
 
     tf = 0.02
-    nlevels = (33, 49, 65, 97)
+    nlevels = (33, 49, 65)
 
     check_analytical_consistency(; tf=tf)
 
     run_scheme_mesh(; scheme=:BE, nlevels=nlevels, tf=tf, cdt=1.0, with_body=true)
     run_scheme_mesh(; scheme=:CN, nlevels=nlevels, tf=tf, cdt=1.0, with_body=true)
-    run_scheme_mesh(; scheme=0.75, nlevels=nlevels, tf=tf, cdt=1.0, with_body=true)
+    #run_scheme_mesh(; scheme=0.75, nlevels=nlevels, tf=tf, cdt=1.0, with_body=true)
 
     println("\nMoving monophasic MMS baseline (no embedded body)")
     println("Same exact solution/forcing with body=-1")
     run_scheme_mesh(; scheme=:BE, nlevels=nlevels, tf=tf, cdt=1.0, with_body=false)
     run_scheme_mesh(; scheme=:CN, nlevels=nlevels, tf=tf, cdt=1.0, with_body=false)
-    run_scheme_mesh(; scheme=0.75, nlevels=nlevels, tf=tf, cdt=1.0, with_body=false)
+    #run_scheme_mesh(; scheme=0.75, nlevels=nlevels, tf=tf, cdt=1.0, with_body=false)
 end
 
 main()

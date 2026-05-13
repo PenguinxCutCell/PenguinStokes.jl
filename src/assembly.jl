@@ -1,3 +1,59 @@
+function _augment_high_side_outflow_divergence!(
+    divd::SparseMatrixCSC{T,Int},
+    cap_ud::AssembledCapacity{N,T},
+    bc_u::NTuple{N,BorderConditions},
+    d::Int,
+    periodic::NTuple{N,Bool},
+) where {N,T}
+    periodic[d] && return divd
+    side_hi = _side_pairs(N)[d][2]
+    side_bcs = _side_velocity_bcs(bc_u, side_hi, T)
+    _is_stokes_traction_bc(side_bcs[d]) || return divd
+    _has_dirichlet_tangential_box_closure(bc_u, d, T) && return divd
+
+    li = LinearIndices(cap_ud.nnodes)
+    @inbounds for I in each_boundary_cell(cap_ud.nnodes, side_hi)
+        i = li[I]
+        Aface = cap_ud.buf.A[d][i]
+        (isfinite(Aface) && Aface > zero(T)) || continue
+
+        Iin1 = CartesianIndex(ntuple(k -> (k == d ? I[k] - 1 : I[k]), N))
+        Iin2 = CartesianIndex(ntuple(k -> (k == d ? I[k] - 2 : I[k]), N))
+        if _is_active_physical(cap_ud, Iin1) && _is_active_physical(cap_ud, Iin2)
+            j1 = li[Iin1]
+            j2 = li[Iin2]
+            divd[i, i] = divd[i, i] + convert(T, 3) * Aface
+            divd[i, j1] = divd[i, j1] - convert(T, 3) * Aface
+            divd[i, j2] = divd[i, j2] + Aface
+        elseif _is_active_physical(cap_ud, Iin1)
+            j1 = li[Iin1]
+            divd[i, i] = divd[i, i] + convert(T, 2) * Aface
+            divd[i, j1] = divd[i, j1] - Aface
+        else
+            divd[i, i] = divd[i, i] + Aface
+        end
+    end
+    return divd
+end
+
+function _has_dirichlet_tangential_box_closure(
+    bc_u::NTuple{N,BorderConditions},
+    normal_dir::Int,
+    ::Type{T},
+) where {N,T}
+    N == 1 && return false
+    pairs = _side_pairs(N)
+    for q in 1:N
+        q == normal_dir && continue
+        side_lo, side_hi = pairs[q]
+        for side in (side_lo, side_hi)
+            side_bcs = _side_velocity_bcs(bc_u, side, T)
+            all(bc -> bc isa Dirichlet, side_bcs) || return false
+        end
+    end
+    return true
+end
+
 function _stokes_blocks(model::StokesModelMono{N,T}) where {N,T}
     nt = model.cap_p.ntotal
 
@@ -51,7 +107,14 @@ function _stokes_blocks(model::StokesModelMono{N,T}) where {N,T}
         rows = ((d - 1) * nt + 1):(d * nt)
         gp = model.op_p.G[rows, :]
         hp = model.op_p.H[rows, :]
-        -(gp' + hp')
+        divd = sparse(-(gp' + hp'))
+        _augment_high_side_outflow_divergence!(
+            divd,
+            model.cap_u[d],
+            model.bc_u,
+            d,
+            model.periodic,
+        )
     end, N)
 
     div_gamma = ntuple(d -> begin
@@ -99,6 +162,7 @@ function _stokes_phase_blocks(
     op_u::NTuple{N,DiffusionOps{N,T}},
     mu::T,
     rho::T,
+    bc_u::NTuple{N,BorderConditions},
     periodic::NTuple{N,Bool},
 ) where {N,T}
     nt = cap_p.ntotal
@@ -153,7 +217,8 @@ function _stokes_phase_blocks(
         rows = ((d - 1) * nt + 1):(d * nt)
         gp = op_p.G[rows, :]
         hp = op_p.H[rows, :]
-        -(gp' + hp')
+        divd = sparse(-(gp' + hp'))
+        _augment_high_side_outflow_divergence!(divd, cap_u[d], bc_u, d, periodic)
     end, N)
 
     div_gamma = ntuple(d -> begin
@@ -218,6 +283,7 @@ function _stokes_blocks(model::StokesModelTwoPhase{N,T}) where {N,T}
         model.op_u1,
         model.mu1,
         model.rho1,
+        model.bc_u,
         model.periodic,
     )
     phase2 = _stokes_phase_blocks(
@@ -227,6 +293,7 @@ function _stokes_blocks(model::StokesModelTwoPhase{N,T}) where {N,T}
         model.op_u2,
         model.mu2,
         model.rho2,
+        model.bc_u,
         model.periodic,
     )
     return (; nt=model.cap_p1.ntotal, phase1, phase2)
@@ -1121,8 +1188,26 @@ function assemble_unsteady_moving!(
 
     blocks_iface = (
         nt=nt,
-        phase1=_stokes_phase_blocks(cap_p1_end, op_p1_end, cap_u1_end, op_u1_end, model.mu1, model.rho1, model.periodic),
-        phase2=_stokes_phase_blocks(cap_p2_end, op_p2_end, cap_u2_end, op_u2_end, model.mu2, model.rho2, model.periodic),
+        phase1=_stokes_phase_blocks(
+            cap_p1_end,
+            op_p1_end,
+            cap_u1_end,
+            op_u1_end,
+            model.mu1,
+            model.rho1,
+            model.bc_u,
+            model.periodic,
+        ),
+        phase2=_stokes_phase_blocks(
+            cap_p2_end,
+            op_p2_end,
+            cap_u2_end,
+            op_u2_end,
+            model.mu2,
+            model.rho2,
+            model.bc_u,
+            model.periodic,
+        ),
     )
     _assemble_interface_traction_rows!(A, b, model, blocks_iface, t_next)
     _apply_auxiliary_trace_rows!(A, b, model)

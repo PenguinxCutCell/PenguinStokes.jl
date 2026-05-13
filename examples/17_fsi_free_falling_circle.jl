@@ -52,7 +52,7 @@ function main()
     xcal = zeros(Float64, last(model_drag.layout.pomega))
     sys_cal = solve_unsteady_moving!(model_drag, xcal; t=0.0, dt=0.02, scheme=:CN)
     sm_cal = endtime_static_model(model_drag)
-    q_cal = integrated_embedded_force(sm_cal, sys_cal; pressure_reconstruction=:linear, x0=Tuple(X0))
+    q_cal = integrated_embedded_force(sm_cal, sys_cal; x0=Tuple(X0))
     force_sign = q_cal.force[2] <= 0 ? 1.0 : -1.0
 
     state = RigidBodyState{2,Float64}(X0, V0)
@@ -69,7 +69,6 @@ function main()
         model,
         state,
         params;
-        pressure_reconstruction=:linear,
         force_sign=force_sign,
     )
 

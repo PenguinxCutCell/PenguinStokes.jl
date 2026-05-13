@@ -531,136 +531,6 @@ function _pressure_gradient_reconstruction(
     return _scalar_gradient(model.op_p, pω, pγ_seed)
 end
 
-@inline function _stress_tensor(
-    μ::T,
-    G::SMatrix{N,N,T},
-    p::T,
-) where {N,T}
-    I_N = SMatrix{N,N,T}(Matrix{T}(I, N, N))
-    return μ .* (G + transpose(G)) - p .* I_N
-end
-
-@inline function _traction_from_stress(
-    σ::SMatrix{N,N,T},
-    n::SVector{N,T},
-) where {N,T}
-    return σ * n
-end
-
-"""
-    embedded_boundary_quantities(model, x; mu=model.mu, pressure_reconstruction=:linear, x0=nothing)
-
-Compute cut-boundary stress/traction diagnostics on the staggered velocity grids.
-
-Returns a named tuple with:
-- `stress`: stress tensors on pressure-grid cut cells
-- `traction`: traction vectors on pressure-grid cut cells
-- `force_density`: integrated force vectors (`traction * Γ`) on pressure-grid cut cells
-- `interface_indices`: active cut-cell indices on the pressure grid
-- `force`: total integrated force vector
-- `force_pressure`, `force_viscous`: pressure/viscous splits of `force`
-- `torque`: scalar in 2D or vector in 3D about `x0`
-"""
-function embedded_boundary_quantities(
-    model::StokesModelMono{N,T},
-    x::AbstractVector;
-    mu::Real=model.mu,
-    pressure_reconstruction::Symbol=:linear,
-    x0=nothing,
-) where {N,T}
-    nsys = nunknowns(model.layout)
-    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
-    μ = convert(T, mu)
-    origin = _as_origin(x0, T, Val(N))
-    nt = model.cap_p.ntotal
-
-    layout = model.layout
-    uω = ntuple(d -> Vector{T}(x[layout.uomega[d]]), N)
-    uγ = ntuple(d -> Vector{T}(x[layout.ugamma[d]]), N)
-    pω = Vector{T}(x[layout.pomega])
-
-    grad_u = ntuple(d -> _scalar_gradient(model.op_u[d], uω[d], uγ[d]), N)
-    grad_p = _pressure_gradient_reconstruction(model, pω, pressure_reconstruction)
-
-    zero_vec = _zero_svector(T, Val(N))
-    zero_sig = zero(SMatrix{N,N,T,N * N})
-
-    stress = fill(zero_sig, nt)
-    traction = fill(zero_vec, nt)
-    force_density = fill(zero_vec, nt)
-    interface_indices = Int[]
-
-    F = zeros(T, N)
-    Fp = zeros(T, N)
-    Fμ = zeros(T, N)
-
-    τ2 = zero(T)
-    τ3 = SVector{3,T}(zero(T), zero(T), zero(T))
-
-    cap = model.cap_p
-    @inbounds for i in 1:cap.ntotal
-        _is_interface_index(cap, i) || continue
-        push!(interface_indices, i)
-
-        Γi = cap.buf.Γ[i]
-        n = cap.n_γ[i]
-        xγi = cap.C_γ[i]
-        pγi = _pressure_trace(model, pω, grad_p, i, xγi, pressure_reconstruction)
-
-        G = MMatrix{N,N,T}(undef)
-        for a in 1:N, b in 1:N
-            G[a, b] = grad_u[a][b][i]
-        end
-        σ = _stress_tensor(μ, SMatrix{N,N,T}(G), pγi)
-        tvec = _traction_from_stress(σ, n)
-        tp = -pγi .* n
-        tv = tvec - tp
-        fvec = Γi .* tvec
-        fpvec = Γi .* tp
-        fvvec = Γi .* tv
-
-        stress[i] = σ
-        traction[i] = tvec
-        force_density[i] = fvec
-
-        F .+= fvec
-        Fp .+= fpvec
-        Fμ .+= fvvec
-
-        if N == 2
-            r = xγi - origin
-            τ2 += r[1] * fvec[2] - r[2] * fvec[1]
-        elseif N == 3
-            r = SVector{3,T}(xγi[1] - origin[1], xγi[2] - origin[2], xγi[3] - origin[3])
-            τ3 += cross(r, SVector{3,T}(fvec[1], fvec[2], fvec[3]))
-        end
-    end
-
-    Ftot = SVector{N,T}(Tuple(F))
-    Fptot = SVector{N,T}(Tuple(Fp))
-    Fμtot = SVector{N,T}(Tuple(Fμ))
-    torque = N == 2 ? τ2 : (N == 3 ? τ3 : nothing)
-
-    return (
-        stress=stress,
-        traction=traction,
-        force_density=force_density,
-        interface_indices=interface_indices,
-        force=Ftot,
-        force_pressure=Fptot,
-        force_viscous=Fμtot,
-        torque=torque,
-    )
-end
-
-function embedded_boundary_quantities(
-    model::StokesModelMono{N,T},
-    sys::LinearSystem{T};
-    kwargs...,
-) where {N,T}
-    return embedded_boundary_quantities(model, sys.x; kwargs...)
-end
-
 """
     embedded_boundary_pressure(model, x; pressure_reconstruction=:linear)
     embedded_boundary_pressure(model, sys; pressure_reconstruction=:linear)
@@ -743,30 +613,277 @@ function embedded_boundary_pressure(
     return embedded_boundary_pressure(model, sys.x; pressure_reconstruction=pressure_reconstruction)
 end
 
-"""
-    embedded_boundary_traction(model, x; kwargs...)
-
-Return pressure-grid traction vectors on embedded boundary cells.
-"""
-function embedded_boundary_traction(model::StokesModelMono, x::AbstractVector; kwargs...)
-    return embedded_boundary_quantities(model, x; kwargs...).traction
+function _apply_force_convention(
+    F::SVector{N,T},
+    Fp::SVector{N,T},
+    Fμ::SVector{N,T},
+    convention::Symbol,
+) where {N,T}
+    if convention === :on_fluid
+        return (force=F, force_pressure=Fp, force_viscous=Fμ)
+    elseif convention === :on_body
+        return (force=-F, force_pressure=-Fp, force_viscous=-Fμ)
+    end
+    throw(ArgumentError("convention must be :on_fluid or :on_body"))
 end
 
-function embedded_boundary_traction(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
-    return embedded_boundary_traction(model, sys.x; kwargs...)
+function _nonzero_row_mask(A::SparseMatrixCSC{T,Int}) where {T}
+    mask = falses(size(A, 1))
+    rows, _, vals = findnz(A)
+    @inbounds for k in eachindex(rows)
+        if vals[k] != zero(T)
+            mask[rows[k]] = true
+        end
+    end
+    return mask
+end
+
+@inline function _force_convention_sign(::Type{T}, convention::Symbol) where {T}
+    if convention === :on_fluid
+        return one(T)
+    elseif convention === :on_body
+        return -one(T)
+    end
+    throw(ArgumentError("convention must be :on_fluid or :on_body"))
 end
 
 """
-    embedded_boundary_stress(model, x; kwargs...)
+    embedded_force_balance_density(model, x; mu=model.mu)
 
-Return pressure-grid stress tensors on embedded boundary cells.
+Return local embedded-boundary force contributions from the cut-boundary terms
+of the discrete momentum balance. The result is a named tuple with `total`,
+`pressure`, and `viscous`, each an `N`-tuple of vectors on the corresponding
+staggered velocity component grid.
+
+The viscous contribution is computed as the cut-face part of the assembled
+diffusive flux,
+
+```
+mu * G_u[d]' * I_gamma[d] * Winv_u[d] * (G_u[d] * u_omega[d] + H_u[d] * u_gamma[d])
+```
+
+where `I_gamma[d]` keeps only face rows touched by `H_u[d]`. This is the exact
+difference between the full viscous operator and the same operator with cut-face
+flux rows removed.
 """
-function embedded_boundary_stress(model::StokesModelMono, x::AbstractVector; kwargs...)
-    return embedded_boundary_quantities(model, x; kwargs...).stress
+function embedded_force_balance_density(
+    model::StokesModelMono{N,T},
+    x::AbstractVector;
+    mu::Real=model.mu,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
+
+    layout = model.layout
+    nt = model.cap_p.ntotal
+    μ = convert(T, mu)
+    pω = Vector{T}(x[layout.pomega])
+
+    r_pressure = ntuple(_ -> zeros(T, nt), N)
+    r_viscous = ntuple(_ -> zeros(T, nt), N)
+    r_total = ntuple(_ -> zeros(T, nt), N)
+
+    @inbounds for d in 1:N
+        opu = model.op_u[d]
+        uω = Vector{T}(x[layout.uomega[d]])
+        uγ = Vector{T}(x[layout.ugamma[d]])
+
+        face_flux = opu.Winv * (opu.G * uω + opu.H * uγ)
+        cut_rows = _nonzero_row_mask(opu.H)
+        @inbounds for i in eachindex(face_flux)
+            cut_rows[i] || (face_flux[i] = zero(T))
+        end
+        rμ = μ .* (opu.G' * face_flux)
+
+        rows = ((d - 1) * nt + 1):(d * nt)
+        Hp_d = model.op_p.H[rows, :]
+        rp = -(Hp_d * pω)
+
+        r_viscous[d] .= rμ
+        r_pressure[d] .= rp
+        r_total[d] .= rμ .+ rp
+    end
+
+    return (
+        total=r_total,
+        pressure=r_pressure,
+        viscous=r_viscous,
+    )
 end
 
-function embedded_boundary_stress(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
-    return embedded_boundary_stress(model, sys.x; kwargs...)
+function embedded_force_balance_density(
+    model::StokesModelMono{N,T},
+    sys::LinearSystem{T};
+    kwargs...,
+) where {N,T}
+    return embedded_force_balance_density(model, sys.x; kwargs...)
+end
+
+function integrated_embedded_torque_balance(
+    model::StokesModelMono{2,T},
+    q,
+    origin::SVector{2,T},
+    convention::Symbol,
+) where {T}
+    τp = zero(T)
+    τμ = zero(T)
+
+    @inbounds for i in eachindex(q.total[1])
+        xγ = model.cap_u[1].C_γ[i]
+        (isfinite(xγ[1]) && isfinite(xγ[2])) || continue
+        y = xγ[2] - origin[2]
+        τp -= y * q.pressure[1][i]
+        τμ -= y * q.viscous[1][i]
+    end
+
+    @inbounds for i in eachindex(q.total[2])
+        xγ = model.cap_u[2].C_γ[i]
+        (isfinite(xγ[1]) && isfinite(xγ[2])) || continue
+        xcoord = xγ[1] - origin[1]
+        τp += xcoord * q.pressure[2][i]
+        τμ += xcoord * q.viscous[2][i]
+    end
+
+    s = _force_convention_sign(T, convention)
+    τ = τp + τμ
+    return (
+        torque=s * τ,
+        torque_pressure=s * τp,
+        torque_viscous=s * τμ,
+    )
+end
+
+function integrated_embedded_torque_balance(
+    model::StokesModelMono{3,T},
+    q,
+    origin::SVector{3,T},
+    convention::Symbol,
+) where {T}
+    Mp = SVector{3,T}(zero(T), zero(T), zero(T))
+    Mμ = SVector{3,T}(zero(T), zero(T), zero(T))
+
+    @inbounds for d in 1:3
+        ed = SVector{3,T}(ntuple(k -> k == d ? one(T) : zero(T), 3))
+        for i in eachindex(q.total[d])
+            xγ = model.cap_u[d].C_γ[i]
+            (isfinite(xγ[1]) && isfinite(xγ[2]) && isfinite(xγ[3])) || continue
+            r = SVector{3,T}(
+                xγ[1] - origin[1],
+                xγ[2] - origin[2],
+                xγ[3] - origin[3],
+            )
+            Mp += cross(r, q.pressure[d][i] * ed)
+            Mμ += cross(r, q.viscous[d][i] * ed)
+        end
+    end
+
+    s = _force_convention_sign(T, convention)
+    M = Mp + Mμ
+    return (
+        torque=s * M,
+        torque_pressure=s * Mp,
+        torque_viscous=s * Mμ,
+    )
+end
+
+"""
+    integrated_embedded_torque_balance(model, x; x0=nothing, convention=:on_body, mu=model.mu)
+
+Return the first moment of the local balance-force density about `x0`. Force
+component `d` is placed at the embedded-interface centroid on the corresponding
+staggered velocity capacity `model.cap_u[d].C_γ`.
+"""
+function integrated_embedded_torque_balance(
+    model::StokesModelMono{N,T},
+    x::AbstractVector;
+    x0=nothing,
+    convention::Symbol=:on_body,
+    mu::Real=model.mu,
+) where {N,T}
+    N == 2 || N == 3 || throw(ArgumentError("torque only implemented for N=2 or N=3"))
+    q = embedded_force_balance_density(model, x; mu=mu)
+    origin = _as_origin(x0, T, Val(N))
+    return integrated_embedded_torque_balance(model, q, origin, convention)
+end
+
+function integrated_embedded_torque_balance(
+    model::StokesModelMono{N,T},
+    sys::LinearSystem{T};
+    kwargs...,
+) where {N,T}
+    return integrated_embedded_torque_balance(model, sys.x; kwargs...)
+end
+
+"""
+    integrated_embedded_force_balance(model, x; convention=:on_body, mu=model.mu, x0=nothing, torque_method=:balance)
+
+Return the integrated embedded-boundary force from the cut-boundary terms in
+the discrete momentum balance. For velocity component `d`, this sums
+
+```
+mu * G_u[d]' * I_gamma[d] * Winv_u[d] * (G_u[d] * u_omega[d] + H_u[d] * u_gamma[d])
+    - H_p[d] * p_omega
+```
+
+over the velocity control volumes. `I_gamma[d]` keeps the operator rows whose
+velocity-grid `H_u[d]` entry participates in the embedded-boundary closure, so
+the viscous part includes both sides of the cut-face flux. This uses the same
+`G`, `H`, and `Winv` operators as the Stokes assembly instead of reconstructing
+`sigma*n` locally on the embedded boundary.
+
+`convention=:on_fluid` returns the force contribution appearing in the fluid
+momentum balance. `convention=:on_body` returns its opposite. With the default
+`torque_method=:balance`, torque is the first moment of the same local balance
+density on the staggered velocity interface grids.
+"""
+function integrated_embedded_force_balance(
+    model::StokesModelMono{N,T},
+    x::AbstractVector;
+    convention::Symbol=:on_body,
+    mu::Real=model.mu,
+    x0=nothing,
+    torque_method::Symbol=:balance,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
+
+    q = embedded_force_balance_density(model, x; mu=mu)
+    Fp = zeros(T, N)
+    Fμ = zeros(T, N)
+
+    @inbounds for d in 1:N
+        Fμ[d] = sum(q.viscous[d])
+        Fp[d] = sum(q.pressure[d])
+    end
+
+    Fμv = SVector{N,T}(Tuple(Fμ))
+    Fpv = SVector{N,T}(Tuple(Fp))
+    Fv = Fμv + Fpv
+    out = _apply_force_convention(Fv, Fpv, Fμv, convention)
+
+    torque = if torque_method === :none
+        N == 2 ? zero(T) : (N == 3 ? SVector{3,T}(zero(T), zero(T), zero(T)) : nothing)
+    elseif torque_method === :balance
+        origin = _as_origin(x0, T, Val(N))
+        integrated_embedded_torque_balance(model, q, origin, convention).torque
+    else
+        throw(ArgumentError("torque_method must be :balance or :none"))
+    end
+
+    return (
+        force=out.force,
+        force_pressure=out.force_pressure,
+        force_viscous=out.force_viscous,
+        torque=torque,
+    )
+end
+
+function integrated_embedded_force_balance(
+    model::StokesModelMono{N,T},
+    sys::LinearSystem{T};
+    kwargs...,
+) where {N,T}
+    return integrated_embedded_force_balance(model, sys.x; kwargs...)
 end
 
 """
@@ -775,8 +892,7 @@ end
 Return integrated embedded-boundary force components and torque.
 """
 function integrated_embedded_force(model::StokesModelMono, x::AbstractVector; kwargs...)
-    q = embedded_boundary_quantities(model, x; kwargs...)
-    return (force=q.force, force_pressure=q.force_pressure, force_viscous=q.force_viscous, torque=q.torque)
+    return integrated_embedded_force_balance(model, x; kwargs...)
 end
 
 function integrated_embedded_force(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}

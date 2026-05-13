@@ -55,7 +55,7 @@ function main()
         sys = solve_unsteady_moving!(model, xprev; t=t, dt=dt, scheme=:CN)
         tnext = t + dt
         sm = endtime_static_model(model)
-        q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=(xc(tnext), yc0))
+        q = integrated_embedded_force(sm, sys; x0=(xc(tnext), yc0))
         res = norm(sys.A * sys.x - sys.b)
         println(step, ", ", tnext, ", ", uw(tnext), ", ", q.force[1], ", ", q.force[2], ", ", q.torque, ", ", res)
         xprev .= sys.x

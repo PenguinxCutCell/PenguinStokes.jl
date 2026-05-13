@@ -746,6 +746,36 @@ end
     @test isapprox(sys.b[ruy], 0.0; atol=1e-12, rtol=0.0)
 end
 
+@testset "Outflow continuity preserves uniform channel flow (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
+    bcx = BorderConditions(
+        ; left=Dirichlet(1.0), right=PressureOutlet(0.0),
+        bottom=Periodic(), top=Periodic(),
+    )
+    bcy = BorderConditions(
+        ; left=Dirichlet(0.0), right=PressureOutlet(0.0),
+        bottom=Periodic(), top=Periodic(),
+    )
+    model = StokesModelMono(
+        grid,
+        full_body,
+        1.0,
+        1.0;
+        bc_u=(bcx, bcy),
+        force=(0.0, 0.0),
+    )
+    nsys = last(model.layout.pomega)
+    sys = LinearSystem(spzeros(Float64, nsys, nsys), zeros(Float64, nsys))
+    assemble_steady!(sys, model, 0.0)
+
+    x_uniform = zeros(Float64, nsys)
+    x_uniform[model.layout.uomega[1]] .= 1.0
+    r = sys.A * x_uniform - sys.b
+
+    pidx = physical_active_indices(model.cap_p)
+    @test norm(r[model.layout.pomega][pidx], Inf) < 1e-12
+end
+
 @testset "Outer-box symmetry BC validation rules (2D)" begin
     grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (17, 17))
 
@@ -1464,7 +1494,7 @@ end
     end
 end
 
-@testset "Embedded boundary force/stress utilities (2D)" begin
+@testset "Embedded boundary balance force utilities (2D)" begin
     grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (41, 41))
     xc, yc, r = 0.5, 0.5, 0.2
     body(x, y) = sqrt((x - xc)^2 + (y - yc)^2) - r
@@ -1485,32 +1515,77 @@ end
     p = view(x, model.layout.pomega)
     p .= 1.0
 
-    q = embedded_boundary_quantities(model, x; pressure_reconstruction=:none, x0=(xc, yc))
-    fint = integrated_embedded_force(model, x; pressure_reconstruction=:none, x0=(xc, yc))
+    qdens = embedded_force_balance_density(model, x)
+    fbal = integrated_embedded_force(model, x; x0=(xc, yc))
 
-    @test !isempty(q.interface_indices)
+    @test isapprox(norm(fbal.force), 0.0; atol=1e-10, rtol=0.0)
+    @test isapprox(norm(fbal.force_pressure), 0.0; atol=1e-10, rtol=0.0)
+    @test isapprox(norm(fbal.force_viscous), 0.0; atol=1e-12, rtol=0.0)
+    @test isfinite(fbal.torque)
 
-    @test isapprox(norm(q.force_viscous), 0.0; atol=1e-12, rtol=0.0)
-    @test isapprox(norm(q.force), 0.0; atol=5e-3, rtol=0.0)
-    @test isapprox(norm(q.force - (q.force_pressure + q.force_viscous)), 0.0; atol=1e-12, rtol=0.0)
-
-    @test q.force == fint.force
-    @test q.force_pressure == fint.force_pressure
-    @test q.force_viscous == fint.force_viscous
-
-    for i in q.interface_indices
-        @test all(isfinite, q.traction[i])
-        @test all(isfinite, q.force_density[i])
+    for d in 1:2
+        @test length(qdens.total[d]) == model.cap_u[d].ntotal
+        @test norm(qdens.total[d] - (qdens.pressure[d] + qdens.viscous[d])) < 1e-12
     end
-    @test isfinite(q.torque)
+end
+
+@testset "Embedded balance force algebraic split (2D)" begin
+    grid = CartesianGrid((0.0, 0.0), (1.0, 1.0), (25, 25))
+    xc, yc, r = 0.5, 0.5, 0.2
+    body(x, y) = r - sqrt((x - xc)^2 + (y - yc)^2)
+    bcper = BorderConditions(
+        ; left=Periodic(), right=Periodic(),
+        bottom=Periodic(), top=Periodic(),
+    )
+    model = StokesModelMono(
+        grid,
+        body,
+        1.7,
+        1.0;
+        bc_u=(bcper, bcper),
+        bc_cut=Dirichlet(0.0),
+        force=(0.0, 0.0),
+    )
+
+    nt = model.cap_p.ntotal
+    nsys = last(model.layout.pomega)
+    x = zeros(Float64, nsys)
+    for i in 1:nsys
+        x[i] = sin(0.13 * i) + 0.2 * cos(0.07 * i)
+    end
+
+    q = embedded_force_balance_density(model, x)
+    pω = Vector{Float64}(x[model.layout.pomega])
+
+    for d in 1:2
+        opu = model.op_u[d]
+        uω = Vector{Float64}(x[model.layout.uomega[d]])
+        uγ = Vector{Float64}(x[model.layout.ugamma[d]])
+
+        full_flux = opu.Winv * (opu.G * uω + opu.H * uγ)
+        bulk_flux = copy(full_flux)
+        cut_rows = PenguinStokes._nonzero_row_mask(opu.H)
+        for i in eachindex(bulk_flux)
+            cut_rows[i] && (bulk_flux[i] = 0.0)
+        end
+        visc_diff = model.mu .* (opu.G' * (full_flux - bulk_flux))
+
+        rows = ((d - 1) * nt + 1):(d * nt)
+        p_full = -((model.op_p.G[rows, :] + model.op_p.H[rows, :]) * pω)
+        p_bulk = -(model.op_p.G[rows, :] * pω)
+        p_diff = p_full - p_bulk
+
+        @test norm(q.viscous[d] - visc_diff) < 1e-11
+        @test norm(q.pressure[d] - p_diff) < 1e-11
+        @test norm(q.total[d] - (visc_diff + p_diff)) < 1e-11
+    end
 end
 
 @testset "Embedded boundary pressure/viscous consistency (2D periodic)" begin
     xc, yc, r = 0.5, 0.5, 0.2
     solid_area = pi * r^2
     ns = (33, 65, 129)
-    err_none = Float64[]
-    err_lin = Float64[]
+    err_balance = Float64[]
 
     bcper = BorderConditions(
         ; left=Periodic(), right=Periodic(),
@@ -1553,31 +1628,36 @@ end
         x_const = zeros(Float64, nsys)
         p_const = view(x_const, model.layout.pomega)
         p_const .= 1.0
-        q_const = embedded_boundary_quantities(model, x_const; pressure_reconstruction=:none)
-        @test norm(q_const.force_pressure) < 1e-10
-        @test norm(q_const.force_viscous) < 1e-12
-        for x0 in ((0.5, 0.5), (0.15, 0.8), (1.1, -0.2))
-            q0 = embedded_boundary_quantities(model, x_const; pressure_reconstruction=:none, x0=x0)
-            @test norm(q0.force_pressure) < 1e-10
-            @test abs(q0.torque) < 1e-10
-        end
+        f_const = integrated_embedded_force_balance(model, x_const; convention=:on_fluid, torque_method=:none)
+        t_const = integrated_embedded_torque_balance(model, x_const; convention=:on_fluid, x0=(0.15, 0.8))
+        @test norm(f_const.force_pressure) < 1e-10
+        @test norm(f_const.force_viscous) < 1e-12
+        @test abs(t_const.torque_pressure) < 1e-10
+        @test abs(t_const.torque_viscous) < 1e-12
 
-        # A2: linear pressure p=x (periodic outer box) -> |F_x| ≈ area(solid), F_y ≈ 0.
+        # A2: linear pressure p=a*x+b*y+c (periodic outer box) gives a clean
+        # pressure-force and pressure-moment target for the operator balance.
         x_lin = zeros(Float64, nsys)
         p_lin = view(x_lin, model.layout.pomega)
+        a, b, c = 1.0, -0.35, 0.7
         for i in 1:nt
             xω = model.cap_p.C_ω[i]
-            if isfinite(xω[1])
-                p_lin[i] = xω[1]
+            if isfinite(xω[1]) && isfinite(xω[2])
+                p_lin[i] = a * xω[1] + b * xω[2] + c
             end
         end
-        q_none = embedded_boundary_quantities(model, x_lin; pressure_reconstruction=:none)
-        q_lin = embedded_boundary_quantities(model, x_lin; pressure_reconstruction=:linear)
-        @test abs(q_none.force_pressure[2]) < 1e-8
-        @test abs(q_lin.force_pressure[2]) < 1e-8
-        push!(err_none, abs(abs(q_none.force_pressure[1]) - solid_area))
-        push!(err_lin, abs(abs(q_lin.force_pressure[1]) - solid_area))
-        @test err_lin[end] <= err_none[end] + 5e-3
+        f_lin = integrated_embedded_force_balance(model, x_lin; convention=:on_fluid, torque_method=:none)
+        t_center = integrated_embedded_torque_balance(model, x_lin; convention=:on_fluid, x0=(xc, yc))
+        x0 = (0.15, 0.8)
+        t_off = integrated_embedded_torque_balance(model, x_lin; convention=:on_fluid, x0=x0)
+        F_exact = solid_area .* SVector(a, b)
+        τ_exact = (xc - x0[1]) * f_lin.force[2] - (yc - x0[2]) * f_lin.force[1]
+        @test norm(f_lin.force_pressure - F_exact) < 7e-2
+        @test norm(f_lin.force_viscous) < 1e-12
+        @test abs(t_center.torque) < 2e-2
+        @test abs(t_off.torque - τ_exact) < 2e-2
+        @test abs(t_off.torque_viscous) < 1e-12
+        push!(err_balance, norm(f_lin.force_pressure - F_exact))
 
         # B (robust): constant velocity field -> zero viscous force.
         x_vel = zeros(Float64, nsys)
@@ -1585,43 +1665,20 @@ end
         view(x_vel, model.layout.uomega[2]) .= -0.7
         view(x_vel, model.layout.ugamma[1]) .= 1.23
         view(x_vel, model.layout.ugamma[2]) .= -0.7
-        q_vel = embedded_boundary_quantities(model, x_vel; pressure_reconstruction=:none)
-        @test norm(q_vel.force_viscous) < 1e-10
+        f_vel = integrated_embedded_force_balance(model, x_vel; convention=:on_fluid, torque_method=:none)
+        t_vel = integrated_embedded_torque_balance(model, x_vel; convention=:on_fluid, x0=(0.15, 0.8))
+        @test norm(f_vel.force_viscous) < 1e-10
+        @test norm(f_vel.force_pressure) < 1e-12
+        @test abs(t_vel.torque_viscous) < 1e-10
+        @test abs(t_vel.torque_pressure) < 1e-12
     end
 
-    @test err_none[2] < err_none[1]
-    @test err_none[3] < err_none[2]
-    @test err_lin[2] < err_lin[1]
-    @test err_lin[3] < err_lin[2]
+    @test err_balance[2] < err_balance[1]
+    @test err_balance[3] < err_balance[2]
 
     for k in 1:2
-        ord_lin = log(err_lin[k] / err_lin[k + 1]) / log(2)
+        ord_lin = log(err_balance[k] / err_balance[k + 1]) / log(2)
         @test ord_lin > 0.7
-    end
-end
-
-@testset "Stress/traction rigid-rotation kernel (symmetric-gradient killer)" begin
-    Grot = SMatrix{2,2,Float64}(0.0, -1.0, 1.0, 0.0) # skew-symmetric: rigid rotation
-    normals = (
-        SVector{2,Float64}(1.0, 0.0),
-        SVector{2,Float64}(0.0, 1.0),
-        normalize(SVector{2,Float64}(1.0, 1.0)),
-        normalize(SVector{2,Float64}(-2.0, 3.0)),
-    )
-
-    σrot = PenguinStokes._stress_tensor(1.0, Grot, 0.0)
-    @test norm(Matrix(σrot)) < 1e-14
-    for n in normals
-        t = PenguinStokes._traction_from_stress(σrot, n)
-        @test norm(t) < 1e-14
-    end
-
-    # Nonzero pressure should yield pure -p*n traction when symmetric part vanishes.
-    p0 = 2.5
-    σp = PenguinStokes._stress_tensor(1.0, Grot, p0)
-    for n in normals
-        t = PenguinStokes._traction_from_stress(σp, n)
-        @test isapprox(t, -p0 .* n; atol=1e-14, rtol=0.0)
     end
 end
 

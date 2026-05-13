@@ -71,7 +71,7 @@ function calibrate_drag(grid, bc, shape, center; dt)
     xprev = zeros(Float64, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=0.0, dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(center))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(center))
 
     force_sign = q.force[3] <= 0 ? 1.0 : -1.0
     kappa = -(force_sign * q.force[3]) / Uprobe
@@ -142,7 +142,6 @@ function main()
         model,
         state0,
         params;
-        pressure_reconstruction=:linear,
         force_sign=cal.force_sign,
         torque_sign=1.0,
     )

@@ -69,7 +69,7 @@ function compute_drag_force(model::StokesModelMono{2,T}, sys::LinearSystem{T}) w
     """
     force_dict = integrated_embedded_force(model, sys)
     force_vec = force_dict.force
-    return (drag=-force_vec[1], lift=-force_vec[2], force=force_vec)
+    return (drag=force_vec[1], lift=force_vec[2], force=force_vec)
 end
 
 function compute_average_velocity(model::StokesModelMono{2,T}, sys::LinearSystem{T}) where {T}

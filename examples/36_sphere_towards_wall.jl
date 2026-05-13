@@ -91,7 +91,6 @@ function run_case(; delta_over_r::Float64, n::Int, L::Float64=8.0)
 
     q = integrated_embedded_force(
         model, sys;
-        pressure_reconstruction=:linear,
         x0=(sphere_cx, 0.0, 0.0),
     )
 

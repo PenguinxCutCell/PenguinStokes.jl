@@ -44,7 +44,7 @@ function run_drag_for_speed(Uz::Float64; n::Int=17, dt::Float64=0.03, nsteps::In
     end
 
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(center))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(center))
     Fz = abs(q.force[3])
     Fref = 6 * pi * mu * R * abs(Uz)
     return (Fz=Fz, Fref=Fref, ratio=(Fref > 0 ? Fz / Fref : NaN), q=q, residual=norm(sys.A * sys.x - sys.b))

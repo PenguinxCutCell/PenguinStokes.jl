@@ -42,7 +42,7 @@ function fsi_single_slab_force(
     xprev = zeros(T, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=zero(T), dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(center))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(center))
     return SVector{2,T}(Tuple(q.force)), q.torque, sys
 end
 
@@ -73,7 +73,7 @@ function fsi_single_slab_force_torque_rotation(
     xprev = zeros(Float64, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=0.0, dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(X0))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(X0))
     return SVector{2,Float64}(Tuple(q.force)), q.torque, sys, model
 end
 
@@ -102,7 +102,7 @@ function fsi_single_slab_force_3d(
     xprev = zeros(T, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=zero(T), dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(center))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(center))
     return SVector{3,T}(Tuple(q.force)), q.torque, sys
 end
 
@@ -201,7 +201,6 @@ end
         model,
         state,
         params;
-        pressure_reconstruction=:linear,
         force_sign=1.0,
         torque_sign=torque_sign,
     )
@@ -254,7 +253,6 @@ end
         model,
         state,
         params;
-        pressure_reconstruction=:linear,
         force_sign=1.0,
         torque_sign=1.0,
     )
@@ -352,7 +350,6 @@ end
             model,
             state,
             params;
-            pressure_reconstruction=:linear,
             force_sign=1.0,
             torque_sign=1.0,
         )

@@ -16,7 +16,10 @@ export StokesLayoutTwoPhase, StokesModelTwoPhase
 export MovingStokesModelMono, MovingStokesModelTwoPhase
 export assemble_steady!, assemble_unsteady!, solve_steady!, solve_unsteady!
 export assemble_unsteady_moving!, solve_unsteady_moving!
-export embedded_boundary_quantities, embedded_boundary_pressure, embedded_boundary_traction, embedded_boundary_stress, integrated_embedded_force
+export embedded_boundary_pressure
+export embedded_force_balance_density
+export integrated_embedded_force, integrated_embedded_force_balance
+export integrated_embedded_torque_balance
 export RigidBodyState, RigidBodyParams, RigidBodyState2D, RigidBodyState3D
 export RigidBodyParams2D, RigidBodyParams3D
 export Circle, Sphere, Ellipse, Ellipsoid

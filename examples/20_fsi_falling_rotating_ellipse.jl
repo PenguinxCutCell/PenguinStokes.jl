@@ -32,7 +32,7 @@ function one_slab_force_torque(
     xprev = zeros(Float64, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=0.0, dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(state.X))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(state.X))
     return q
 end
 
@@ -99,7 +99,6 @@ function main()
         model,
         state0,
         params;
-        pressure_reconstruction=:linear,
         force_sign=force_sign,
         torque_sign=torque_sign,
     )

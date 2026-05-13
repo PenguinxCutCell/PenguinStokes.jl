@@ -30,7 +30,7 @@ model = StokesModelMono(
 sys = solve_steady!(model)
 
 pdata = embedded_boundary_pressure(model, sys; pressure_reconstruction=:linear)
-fdata = integrated_embedded_force(model, sys; pressure_reconstruction=:linear)
+fdata = integrated_embedded_force(model, sys)
 
 idx = pdata.interface_indices
 nsamp = length(idx)
@@ -66,6 +66,6 @@ end
 
 println("interface samples = ", nsamp)
 println("pressure force (embedded_boundary_pressure) = ", pdata.force)
-println("pressure force (integrated_embedded_force) = ", fdata.force_pressure)
-println("||difference|| = ", norm(pdata.force - fdata.force_pressure))
+println("pressure force (balance integrated_embedded_force) = ", fdata.force_pressure)
+println("||pressure-trace helper - balance pressure|| = ", norm(pdata.force - fdata.force_pressure))
 println("wrote: ", outfile)

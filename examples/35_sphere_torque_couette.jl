@@ -66,13 +66,12 @@ function run_torque_case(; n::Int, L::Float64=8.0)
 
     q = integrated_embedded_force(
         model, sys;
-        pressure_reconstruction=:linear,
         x0=(0.0, 0.0, 0.0),
     )
 
     T_ref = stokes_torque_z()
     T_z   = q.torque[3]
-    rel   = abs(abs(T_z) - T_ref) / T_ref
+    rel   = abs(T_z - T_ref) / T_ref
     res   = norm(sys.A * sys.x - sys.b)
 
     return (T_z=T_z, T_ref=T_ref, rel_err=rel, residual=res)

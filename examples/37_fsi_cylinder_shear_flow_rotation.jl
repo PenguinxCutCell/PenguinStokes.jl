@@ -76,7 +76,7 @@ function calibrate_kappa(shape::Circle{Float64}, X0::SVector{2,Float64}; n::Int,
     xprev = zeros(Float64, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=0.0, dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(X0))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(X0))
 
     torque_sign = q.torque <= 0 ? 1.0 : -1.0
     kappa = -(torque_sign * q.torque)   # kappa > 0: drag coefficient
@@ -141,7 +141,6 @@ function main()
         model,
         state0,
         params;
-        pressure_reconstruction=:linear,
         force_sign=1.0,
         torque_sign=cal.torque_sign,
     )
@@ -158,7 +157,7 @@ function main()
 
         if step % report_every == 0 || step == nsteps
             sm = endtime_static_model(fsi.model)
-            q  = integrated_embedded_force(sm, out.sys; pressure_reconstruction=:linear, x0=Tuple(X0))
+            q  = integrated_embedded_force(sm, out.sys; x0=Tuple(X0))
             println(
                 "$(lpad(step, 5))  $(round(t; digits=3))  ",
                 "$(round(out.omega; sigdigits=5))  ",

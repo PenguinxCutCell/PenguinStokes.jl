@@ -73,7 +73,6 @@ mutable struct StokesFSIProblem{N,T,MT,ST,PT}
     state::ST
     params::PT
     xprev::Vector{T}
-    pressure_reconstruction::Symbol
     force_sign::T
     torque_sign::T
 end
@@ -85,7 +84,6 @@ function StokesFSIProblem(
     state,
     params;
     xprev::Union{Nothing,AbstractVector{T}}=nothing,
-    pressure_reconstruction::Symbol=:linear,
     force_sign::Real=one(T),
     torque_sign::Real=one(T),
 ) where {N,T,FT}
@@ -101,7 +99,6 @@ function StokesFSIProblem(
         state,
         params,
         x0,
-        pressure_reconstruction,
         convert(T, force_sign),
         convert(T, torque_sign),
     )
@@ -349,7 +346,6 @@ function step_fsi!(
     q = integrated_embedded_force(
         sm,
         sys;
-        pressure_reconstruction=fsi.pressure_reconstruction,
         x0=Tuple(state_position(snext_pred)),
     )
 

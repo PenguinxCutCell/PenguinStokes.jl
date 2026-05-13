@@ -94,7 +94,6 @@ Fields:
 - `params`  — `Vector` of rigid body params
 - `shapes`  — `Vector` of `AbstractRigidShape`
 - `xprev`   — previous fluid solution vector
-- `pressure_reconstruction` — `:linear` or `:mean`
 - `force_signs`  — per-body drag sign (±1)
 - `torque_signs` — per-body torque sign (±1)
 """
@@ -104,7 +103,6 @@ mutable struct MultiBodyFSIProblem{Nbodies,N,T,MT}
     params::Vector{Any}
     shapes::Vector{Any}
     xprev::Vector{T}
-    pressure_reconstruction::Symbol
     force_signs::Vector{T}
     torque_signs::Vector{T}
 end
@@ -121,7 +119,6 @@ Construct a `MultiBodyFSIProblem`.
 
 Keyword arguments:
 - `xprev`  — initial fluid state (zeros if not provided)
-- `pressure_reconstruction` — `:linear` (default)
 - `force_signs`  — per-body ±1 vector (default: all 1)
 - `torque_signs` — per-body ±1 vector (default: all 1)
 """
@@ -131,7 +128,6 @@ function MultiBodyFSIProblem(
     params::AbstractVector,
     shapes::AbstractVector;
     xprev::Union{Nothing,AbstractVector{T}}=nothing,
-    pressure_reconstruction::Symbol=:linear,
     force_signs::AbstractVector{<:Real}=ones(T, length(states)),
     torque_signs::AbstractVector{<:Real}=ones(T, length(states)),
 ) where {N,T,FT}
@@ -149,7 +145,6 @@ function MultiBodyFSIProblem(
         collect(Any, params),
         collect(Any, shapes),
         x0,
-        pressure_reconstruction,
         convert(Vector{T}, force_signs),
         convert(Vector{T}, torque_signs),
     )
@@ -181,58 +176,59 @@ function _per_body_forces(
     statefuns,
     tnext::T,
 ) where {Nbodies,N,T}
-    q_all = embedded_boundary_quantities(
-        sm, sys;
-        pressure_reconstruction=fsi.pressure_reconstruction,
-        x0=nothing,   # torque computed per-body below
-    )
-
-    cap = sm.cap_p
+    q_all = embedded_force_balance_density(sm, sys)
 
     # Per-body accumulators.
     F  = [zeros(T, N) for _ in 1:Nbodies]
     τ2 = zeros(T, Nbodies)                          # 2D torque
     τ3 = [zeros(T, 3) for _ in 1:Nbodies]           # 3D torque
 
-    for i in q_all.interface_indices
-        xγ = cap.C_γ[i]
-        # Assign cell to the body with largest SDF at the interface centroid.
-        best_val = typemin(T)
-        best_k   = 1
-        for k in 1:Nbodies
-            s  = statefuns[k](tnext)
-            T2 = eltype(state_position(s))
-            xl = SVector{N,T2}(ntuple(d -> convert(T2, xγ[d]), N))
-            X  = state_position(s)
-            xi = if rotation_affects_geometry(fsi.shapes[k])
-                rotate_to_body_frame(xl, X, state_orientation(s))
-            else
-                xl - X
-            end
-            v = sdf(fsi.shapes[k], xi)
-            if v > best_val
-                best_val = v
-                best_k   = k
-            end
-        end
+    @inbounds for dforce in 1:N
+        for i in eachindex(q_all.total[dforce])
+            fcomp = -q_all.total[dforce][i] # balance density is on-fluid; FSI wants on-body
+            iszero(fcomp) && continue
 
-        fv = q_all.force_density[i]
-        for d in 1:N
-            F[best_k][d] += fv[d]
-        end
+            xγ = sm.cap_u[dforce].C_γ[i]
+            all(j -> isfinite(xγ[j]), 1:N) || continue
 
-        # Torque contribution relative to body centre.
-        s_k = statefuns[best_k](tnext)
-        X_k = SVector{N,T}(state_position(s_k))
-        r   = SVector{N,T}(ntuple(d -> convert(T, xγ[d]) - X_k[d], N))
-        fvs = SVector{N,T}(ntuple(d -> convert(T, fv[d]), N))
-        if N == 2
-            τ2[best_k] += r[1] * fvs[2] - r[2] * fvs[1]
-        elseif N == 3
-            rf  = SVector{3,T}(r[1], r[2], r[3])
-            fvf = SVector{3,T}(fvs[1], fvs[2], fvs[3])
-            c   = rf × fvf
-            τ3[best_k] .+= c
+            # Assign component contribution to the body with the largest SDF
+            # value at that staggered velocity-interface centroid.
+            best_val = typemin(T)
+            best_k   = 1
+            for k in 1:Nbodies
+                s  = statefuns[k](tnext)
+                T2 = eltype(state_position(s))
+                xl = SVector{N,T2}(ntuple(d -> convert(T2, xγ[d]), N))
+                X  = state_position(s)
+                xi = if rotation_affects_geometry(fsi.shapes[k])
+                    rotate_to_body_frame(xl, X, state_orientation(s))
+                else
+                    xl - X
+                end
+                v = sdf(fsi.shapes[k], xi)
+                if v > best_val
+                    best_val = v
+                    best_k   = k
+                end
+            end
+
+            F[best_k][dforce] += fcomp
+
+            # Torque contribution relative to body centre.
+            s_k = statefuns[best_k](tnext)
+            X_k = SVector{N,T}(state_position(s_k))
+            r   = SVector{N,T}(ntuple(d -> convert(T, xγ[d]) - X_k[d], N))
+            if N == 2
+                if dforce == 1
+                    τ2[best_k] -= r[2] * fcomp
+                else
+                    τ2[best_k] += r[1] * fcomp
+                end
+            elseif N == 3
+                ed = SVector{3,T}(ntuple(k -> k == dforce ? one(T) : zero(T), 3))
+                c = SVector{3,T}(r[1], r[2], r[3]) × (fcomp * ed)
+                τ3[best_k] .+= c
+            end
         end
     end
 

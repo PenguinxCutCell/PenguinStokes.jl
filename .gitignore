@@ -9,3 +9,5 @@ presentation.qmd
 presentation.html
 /presentation_files
 *.log
+scripts/
+*.tmp

@@ -29,7 +29,7 @@ function calibrate_rotational_drag(shape::Circle{Float64}, X0::SVector{2,Float64
     xprev = zeros(Float64, last(model.layout.pomega))
     sys = solve_unsteady_moving!(model, xprev; t=0.0, dt=dt, scheme=:CN)
     sm = endtime_static_model(model)
-    q = integrated_embedded_force(sm, sys; pressure_reconstruction=:linear, x0=Tuple(X0))
+    q = integrated_embedded_force(sm, sys; x0=Tuple(X0))
 
     torque_sign = q.torque <= 0 ? 1.0 : -1.0
     kappa = -(torque_sign * q.torque)
@@ -79,7 +79,6 @@ function main()
         model,
         state0,
         params;
-        pressure_reconstruction=:linear,
         force_sign=1.0,
         torque_sign=cal.torque_sign,
     )

@@ -59,7 +59,7 @@ function main()
 
     for step in 1:nsteps
         sys = solve_unsteady!(model, xprev; t=t, dt=dt, scheme=:BE)
-        q = integrated_embedded_force(model, sys; pressure_reconstruction=:linear, x0=CENTER)
+        q = integrated_embedded_force(model, sys; x0=CENTER)
         ubar = bulk_mean_ux(model, sys.x)
         drag_ref = 6 * pi * MU * RADIUS * abs(ubar)
         ratio = drag_ref > 0 ? abs(q.force[1]) / drag_ref : NaN

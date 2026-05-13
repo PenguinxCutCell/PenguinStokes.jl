@@ -62,8 +62,7 @@ function main()
     ω = 2 * pi
 
     xc(t) = xc0 + amp * sin(ω * t)
-    uexact(t) = amp * ω * cos(ω * t)
-    duexact(t) = -amp * ω^2 * sin(ω * t)
+    iface_speed(t) = amp * ω * cos(ω * t)
     body(x, y, t) = R - sqrt((x - xc(t))^2 + (y - yc0)^2)
 
     ρ1 = 1.0
@@ -77,8 +76,8 @@ function main()
         rho2=ρ2,
         bc_u=(bc, bc),
         bc_p=bc,
-        force1=((x, y, t) -> ρ1 * duexact(t), 0.0),
-        force2=((x, y, t) -> ρ2 * duexact(t), 0.0),
+        force1=(0.0, 0.0),
+        force2=(0.0, 0.0),
         interface_jump=(0.0, 0.0),
         interface_force=(0.0, 0.0),
         gauge=PinPressureGauge(),
@@ -99,12 +98,13 @@ function main()
         tnext = t + dt
 
         ubar = mean_ux(model, sys.x)
-        uref = uexact(tnext)
+        uref = 0.0
+        uwall = iface_speed(tnext)
         ejx, ejy, niface = max_interface_jump_error(model, sys.x, 0.0, 0.0)
         res = norm(sys.A * sys.x - sys.b)
 
         println(
-            "step=$step  t=$tnext  ubar=$ubar  uref=$uref  ",
+            "step=$step  t=$tnext  ubar=$ubar  uref=$uref  iface_speed=$uwall  ",
             "|ubar-uref|=$(abs(ubar - uref))  jump_err=($ejx,$ejy)  ",
             "iface_cells=$niface  ||Ax-b||=$res",
         )
