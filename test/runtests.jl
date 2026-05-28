@@ -1909,6 +1909,7 @@ end
 
 include("moving_boundary_stokes_tests.jl")
 include("moving_boundary_stokes_twophase_tests.jl")
+include("free_surface_gcl_tests.jl")
 include("fsi_tests.jl")
 include("contact_tests.jl")
 include("api_smoke_tests.jl")
