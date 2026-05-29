@@ -7,6 +7,7 @@ using StaticArrays
 using CartesianGeometry: GeometricMoments, geometric_moments, nan
 using CartesianGrids: CartesianGrid, SpaceTimeCartesianGrid, grid1d, meshsize
 using CartesianOperators: AssembledCapacity, DiffusionOps, assembled_capacity, each_boundary_cell, periodic_flags, side_info
+using FrontTrackingMethods
 using GlobalHeightFunctions
 using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, Symmetry, InterfaceConditions, ScalarJump, FluxJump, eval_bc, validate_borderconditions!
 using PenguinSolverCore: LinearSystem, solve!
@@ -36,9 +37,11 @@ export PairwiseParticleContact
 export contact_force, wall_contact_force, pairwise_contact_forces
 export apply_contact_projection!
 export AbstractInterfaceRep, GlobalHFRep, GraphLevelSet, update_graph_levelset!
+export FrontTrackingRep, FrontTrackingLevelSet, update_front_levelset!
 export FreeSurfaceStokesProblem, FreeSurfaceStokesOptions, StokesGHFCouplingHistory, StokesGCLTerms
 export step_free_surface_stokes!, stokes_gcl_terms_mono, stokes_gcl_terms_diph
 export stokes_pressure_volume, mask_inactive_pressure_cells
+export CoupledFrontTrackingOptions, CoupledMovingStokesProblem, step_coupled_fronttracking!
 
 include("types.jl")
 include("validation.jl")
@@ -52,9 +55,11 @@ include("analysis.jl")
 include("constructors.jl")
 include("interface/abstract.jl")
 include("interface/ghf_rep.jl")
+include("interface/front_tracking_rep.jl")
 include("free_surface/gcl_residual.jl")
 include("free_surface/coupling_history.jl")
 include("free_surface/ghf_coupling.jl")
+include("free_surface/coupled_fronttracking_stokes.jl")
 
 include("orientation.jl")
 include("rigidbody.jl")
