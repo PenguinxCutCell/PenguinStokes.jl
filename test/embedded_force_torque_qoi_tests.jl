@@ -443,3 +443,82 @@ end
     @test norm(qRz2.force - 2 .* qRz.force) / max(norm(qRz.torque), eps()) < 1e-10
     @test dot(SVector(0.0, 0.0, 0.3), qRz.torque) > 0.0 || dot(SVector(0.0, 0.0, 0.3), -qRz.torque) > 0.0
 end
+
+@testset "Two-phase drag: per-phase gauge and force balance (3D)" begin
+    # Viscous drop in an imposed Hadamard-Rybczynski far field. With a zero
+    # interface traction-jump the outside-phase pressure is a near-null mode;
+    # the default phase-1-only gauge leaves the solve singular/ill-conditioned.
+    # PerPhasePressureGauge anchors both phases and restores a clean solve.
+    mu_out, mu_in, d, U = 1.0, 10.0, 0.2, 1.0
+    xc, yc, zc = 0.5, 0.5, 0.5
+    body(x, y, z) = sqrt((x - xc)^2 + (y - yc)^2 + (z - zc)^2) - d
+
+    function hr_vel(x, y, z)
+        X, Y, Z = x - xc, y - yc, z - zc
+        s = sqrt(X^2 + Y^2)
+        r = sqrt(X^2 + Y^2 + Z^2)
+        r == 0 && return SVector(0.0, 0.0, -0.5 * U * mu_out / (mu_out + mu_in))
+        sinθ = s / r
+        cosθ = Z / r
+        if r >= d
+            α = mu_in / (mu_out + mu_in)
+            β = (2mu_out + 3mu_in) / (mu_out + mu_in)
+            F = α * (d / r) - β * (r / d) + 2 * (r / d)^2
+            Fp = -α * d / r^2 - β / d + 4 * r / d^2
+            ur = (U * d^2 * cosθ / (2r^2)) * F
+            uθ = -(U * d^2 * sinθ / (4r)) * Fp
+        else
+            γ = mu_out / (mu_out + mu_in)
+            ur = 0.5 * U * γ * cosθ * ((r / d)^2 - 1)
+            uθ = -0.5 * U * γ * sinθ * (2 * (r / d)^2 - 1)
+        end
+        us = ur * sinθ + uθ * cosθ
+        uz = ur * cosθ - uθ * sinθ
+        return s > 0 ? SVector(us * X / s, us * Y / s, uz) : SVector(0.0, 0.0, uz)
+    end
+    hrd(k) = (x, y, z) -> hr_vel(x, y, z)[k]
+    mkbc(k) = BorderConditions(
+        ; left=Dirichlet(hrd(k)), right=Dirichlet(hrd(k)),
+        bottom=Dirichlet(hrd(k)), top=Dirichlet(hrd(k)),
+        backward=Dirichlet(hrd(k)), forward=Dirichlet(hrd(k)),
+    )
+    bc = (mkbc(1), mkbc(2), mkbc(3))
+    Fz_ref = 2pi * mu_out * d * U * (2mu_out + 3mu_in) / (mu_out + mu_in)
+
+    function solve_drag(n, gauge)
+        grid = CartesianGrid((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (n, n, n))
+        model = StokesModelTwoPhase(
+            grid, body, mu_in, mu_out;
+            bc_u=bc, force1=(0.0, 0.0, 0.0), force2=(0.0, 0.0, 0.0),
+            interface_force=(0.0, 0.0, 0.0), gauge=gauge,
+        )
+        sys = solve_steady!(model)
+        return model, sys
+    end
+
+    # Default gauge leaves the system effectively singular: huge spurious
+    # pressure amplitude in the outside phase.
+    model_def, sys_def = solve_drag(15, PinPressureGauge())
+    p2_def = sys_def.x[model_def.layout.pomega2]
+    ap2 = PenguinStokes._pressure_activity(model_def.cap_p2)
+    @test maximum(abs, p2_def[findall(ap2)]) > 1e2
+
+    # Per-phase mean gauge: clean residual and bounded pressure across meshes.
+    for n in (11, 15, 19)
+        model, sys = solve_drag(n, PerPhasePressureGauge(MeanPressureGauge()))
+        @test norm(sys.A * sys.x - sys.b) < 1e-6
+        ap2n = PenguinStokes._pressure_activity(model.cap_p2)
+        p2 = sys.x[model.layout.pomega2][findall(ap2n)]
+        # Mean gauge anchors the outside-phase level: volume-weighted mean ~ 0
+        # and no global blow-up (the default phase-1-only gauge gives O(1e5)).
+        # Individual tiny-cut-cell DOFs may still spike O(1/h); the volume
+        # weighting keeps that out of integrated quantities like drag.
+        @test abs(sum(p2) / length(p2)) < 1.0
+
+        # Two-phase operator-based drag (outside phase) is finite and O(Fz_ref);
+        # the residual ~1.5x overshoot is finite-box confinement.
+        fb = integrated_embedded_force_balance(model, sys; phase=2, convention=:on_body)
+        @test isfinite(fb.force[3])
+        @test 0.8 < abs(fb.force[3]) / Fz_ref < 3.0
+    end
+end

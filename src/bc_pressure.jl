@@ -278,10 +278,29 @@ function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::
     throw(ArgumentError("unsupported pressure gauge type $(typeof(model.gauge))"))
 end
 
+function _apply_phase_pressure_gauge!(
+    A::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    gauge::AbstractPressureGauge,
+    pomega::UnitRange{Int},
+    cap::AssembledCapacity{N,T},
+) where {N,T}
+    if gauge isa PinPressureGauge
+        return _apply_pin_pressure_gauge!(A, b, pomega, cap, gauge)
+    elseif gauge isa MeanPressureGauge
+        return _apply_mean_pressure_gauge!(A, b, pomega, cap)
+    end
+    throw(ArgumentError("unsupported per-phase pressure gauge type $(typeof(gauge))"))
+end
+
 function _apply_pressure_gauge!(A::SparseMatrixCSC{T,Int}, b::Vector{T}, model::StokesModelTwoPhase{N,T}) where {N,T}
     layout = model.layout
 
-    if model.gauge isa PinPressureGauge
+    if model.gauge isa PerPhasePressureGauge
+        _apply_phase_pressure_gauge!(A, b, model.gauge.inner, layout.pomega1, model.cap_p1)
+        _apply_phase_pressure_gauge!(A, b, model.gauge.inner, layout.pomega2, model.cap_p2)
+        return A, b
+    elseif model.gauge isa PinPressureGauge
         return _apply_pin_pressure_gauge!(A, b, layout.pomega1, model.cap_p1, model.gauge)
     elseif model.gauge isa MeanPressureGauge
         return _apply_mean_pressure_gauge!(A, b, layout.pomega1, model.cap_p1)

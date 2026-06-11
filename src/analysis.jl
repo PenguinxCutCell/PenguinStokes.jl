@@ -719,6 +719,81 @@ function embedded_force_balance_density(
     return embedded_force_balance_density(model, sys.x; kwargs...)
 end
 
+"""
+    embedded_force_balance_density(model::StokesModelTwoPhase, x; phase=2, mu=nothing)
+
+Two-phase version of the embedded-boundary balance-force density. It returns the
+cut-boundary contribution of the discrete momentum balance for one phase, using
+the same `G`, `H`, and `Winv` operators as the Stokes assembly rather than
+reconstructing `sigma*n` pointwise on the interface (which divides by vanishing
+cut-cell volumes and does not converge under refinement).
+
+`phase=2` selects the outside phase (`op_u2`, `op_p2`, `uomega2`, `ugamma2`,
+`pomega2`); `phase=1` selects the inside phase. `mu` defaults to the selected
+phase viscosity. The result is a named tuple `(total, pressure, viscous)` of
+`N`-tuples of vectors on the staggered velocity grids, matching the mono method.
+"""
+function embedded_force_balance_density(
+    model::StokesModelTwoPhase{N,T},
+    x::AbstractVector;
+    phase::Int=2,
+    mu::Union{Nothing,Real}=nothing,
+) where {N,T}
+    nsys = nunknowns(model.layout)
+    length(x) == nsys || throw(DimensionMismatch("state length must be $nsys"))
+    (phase == 1 || phase == 2) || throw(ArgumentError("phase must be 1 or 2"))
+
+    layout = model.layout
+    nt = layout.nt
+    op_u = phase == 1 ? model.op_u1 : model.op_u2
+    op_p = phase == 1 ? model.op_p1 : model.op_p2
+    uomega = phase == 1 ? layout.uomega1 : layout.uomega2
+    ugamma = phase == 1 ? layout.ugamma1 : layout.ugamma2
+    pomega = phase == 1 ? layout.pomega1 : layout.pomega2
+    μ = convert(T, isnothing(mu) ? (phase == 1 ? model.mu1 : model.mu2) : mu)
+
+    pω = Vector{T}(x[pomega])
+
+    r_pressure = ntuple(_ -> zeros(T, nt), N)
+    r_viscous = ntuple(_ -> zeros(T, nt), N)
+    r_total = ntuple(_ -> zeros(T, nt), N)
+
+    @inbounds for d in 1:N
+        opu = op_u[d]
+        uω = Vector{T}(x[uomega[d]])
+        uγ = Vector{T}(x[ugamma[d]])
+
+        face_flux = opu.Winv * (opu.G * uω + opu.H * uγ)
+        cut_rows = _nonzero_row_mask(opu.H)
+        @inbounds for i in eachindex(face_flux)
+            cut_rows[i] || (face_flux[i] = zero(T))
+        end
+        rμ = μ .* (opu.G' * face_flux)
+
+        rows = ((d - 1) * nt + 1):(d * nt)
+        Hp_d = op_p.H[rows, :]
+        rp = -(Hp_d * pω)
+
+        r_viscous[d] .= rμ
+        r_pressure[d] .= rp
+        r_total[d] .= rμ .+ rp
+    end
+
+    return (
+        total=r_total,
+        pressure=r_pressure,
+        viscous=r_viscous,
+    )
+end
+
+function embedded_force_balance_density(
+    model::StokesModelTwoPhase{N,T},
+    sys::LinearSystem{T};
+    kwargs...,
+) where {N,T}
+    return embedded_force_balance_density(model, sys.x; kwargs...)
+end
+
 function integrated_embedded_torque_balance(
     model::StokesModelMono{2,T},
     q,
@@ -896,5 +971,125 @@ function integrated_embedded_force(model::StokesModelMono, x::AbstractVector; kw
 end
 
 function integrated_embedded_force(model::StokesModelMono{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
+    return integrated_embedded_force(model, sys.x; kwargs...)
+end
+
+function _integrated_torque_balance_from_centroids(
+    cap_u,
+    q,
+    origin::SVector{2,T},
+    convention::Symbol,
+) where {T}
+    τp = zero(T)
+    τμ = zero(T)
+    @inbounds for i in eachindex(q.total[1])
+        xγ = cap_u[1].C_γ[i]
+        (isfinite(xγ[1]) && isfinite(xγ[2])) || continue
+        y = xγ[2] - origin[2]
+        τp -= y * q.pressure[1][i]
+        τμ -= y * q.viscous[1][i]
+    end
+    @inbounds for i in eachindex(q.total[2])
+        xγ = cap_u[2].C_γ[i]
+        (isfinite(xγ[1]) && isfinite(xγ[2])) || continue
+        xcoord = xγ[1] - origin[1]
+        τp += xcoord * q.pressure[2][i]
+        τμ += xcoord * q.viscous[2][i]
+    end
+    s = _force_convention_sign(T, convention)
+    return s * (τp + τμ)
+end
+
+function _integrated_torque_balance_from_centroids(
+    cap_u,
+    q,
+    origin::SVector{3,T},
+    convention::Symbol,
+) where {T}
+    Mp = SVector{3,T}(zero(T), zero(T), zero(T))
+    Mμ = SVector{3,T}(zero(T), zero(T), zero(T))
+    @inbounds for d in 1:3
+        ed = SVector{3,T}(ntuple(k -> k == d ? one(T) : zero(T), 3))
+        for i in eachindex(q.total[d])
+            xγ = cap_u[d].C_γ[i]
+            (isfinite(xγ[1]) && isfinite(xγ[2]) && isfinite(xγ[3])) || continue
+            r = SVector{3,T}(
+                xγ[1] - origin[1],
+                xγ[2] - origin[2],
+                xγ[3] - origin[3],
+            )
+            Mp += cross(r, q.pressure[d][i] * ed)
+            Mμ += cross(r, q.viscous[d][i] * ed)
+        end
+    end
+    s = _force_convention_sign(T, convention)
+    return s * (Mp + Mμ)
+end
+
+"""
+    integrated_embedded_force_balance(model::StokesModelTwoPhase, x; phase=2,
+        convention=:on_body, mu=nothing, x0=nothing, torque_method=:balance)
+
+Two-phase embedded-boundary force (and torque) from the discrete momentum
+balance of the selected `phase` (default `2`, the outside phase). This is the
+well-conditioned drag method: it integrates the same cut-face flux operators
+used in assembly instead of reconstructing `sigma*n` pointwise. For a drop in a
+uniform/Hadamard–Rybczynski far field, `phase=2` with `convention=:on_body`
+gives the hydrodynamic force the surrounding fluid exerts on the drop.
+"""
+function integrated_embedded_force_balance(
+    model::StokesModelTwoPhase{N,T},
+    x::AbstractVector;
+    phase::Int=2,
+    convention::Symbol=:on_body,
+    mu::Union{Nothing,Real}=nothing,
+    x0=nothing,
+    torque_method::Symbol=:balance,
+) where {N,T}
+    N == 2 || N == 3 || throw(ArgumentError("force balance only implemented for N=2 or N=3"))
+    q = embedded_force_balance_density(model, x; phase=phase, mu=mu)
+
+    Fp = zeros(T, N)
+    Fμ = zeros(T, N)
+    @inbounds for d in 1:N
+        Fμ[d] = sum(q.viscous[d])
+        Fp[d] = sum(q.pressure[d])
+    end
+
+    Fμv = SVector{N,T}(Tuple(Fμ))
+    Fpv = SVector{N,T}(Tuple(Fp))
+    out = _apply_force_convention(Fμv + Fpv, Fpv, Fμv, convention)
+
+    cap_u = phase == 1 ? model.cap_u1 : model.cap_u2
+    torque = if torque_method === :none
+        N == 2 ? zero(T) : SVector{3,T}(zero(T), zero(T), zero(T))
+    elseif torque_method === :balance
+        origin = _as_origin(x0, T, Val(N))
+        _integrated_torque_balance_from_centroids(cap_u, q, origin, convention)
+    else
+        throw(ArgumentError("torque_method must be :balance or :none"))
+    end
+
+    return (
+        force=out.force,
+        force_pressure=out.force_pressure,
+        force_viscous=out.force_viscous,
+        torque=torque,
+    )
+end
+
+function integrated_embedded_force_balance(
+    model::StokesModelTwoPhase{N,T},
+    sys::LinearSystem{T};
+    kwargs...,
+) where {N,T}
+    return integrated_embedded_force_balance(model, sys.x; kwargs...)
+end
+
+function integrated_embedded_force(model::StokesModelTwoPhase, x::AbstractVector; kwargs...)
+    return integrated_embedded_force_balance(model, x; kwargs...)
+end
+
+function integrated_embedded_force(model::StokesModelTwoPhase{N,T}, sys::LinearSystem{T}; kwargs...) where {N,T}
     return integrated_embedded_force(model, sys.x; kwargs...)
 end

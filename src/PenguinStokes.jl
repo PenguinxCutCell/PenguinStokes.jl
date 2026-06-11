@@ -12,7 +12,7 @@ using GlobalHeightFunctions
 using PenguinBCs: AbstractBoundary, BorderConditions, Dirichlet, Neumann, Periodic, Traction, PressureOutlet, DoNothing, Symmetry, InterfaceConditions, ScalarJump, FluxJump, eval_bc, validate_borderconditions!
 using PenguinSolverCore: LinearSystem, solve!
 
-export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge
+export AbstractPressureGauge, PinPressureGauge, MeanPressureGauge, PerPhasePressureGauge
 export StokesLayout, StokesModelMono, staggered_velocity_grids
 export StokesLayoutTwoPhase, StokesModelTwoPhase
 export MovingStokesModelMono, MovingStokesModelTwoPhase

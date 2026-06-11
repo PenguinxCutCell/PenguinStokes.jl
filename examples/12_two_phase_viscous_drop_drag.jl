@@ -133,35 +133,23 @@ function solve_drag(n::Int)
         force1=(0.0, 0.0, 0.0),
         force2=(0.0, 0.0, 0.0),
         interface_force=(0.0, 0.0, 0.0),
+        # With a zero interface traction-jump, the interface coupling is too weak
+        # (O(h^2)) to anchor the outside-phase pressure level, so the default
+        # phase-1-only gauge leaves phase 2 as a near-null mode that pollutes the
+        # solution. Gauge each phase independently; the mean variant is robust to
+        # degenerate cut cells (the pin variant can land on a tiny one).
+        gauge=PerPhasePressureGauge(MeanPressureGauge()),
     )
 
     sys = solve_steady!(model)
-    layout = model.layout
-    uγ = ntuple(k -> Vector{Float64}(sys.x[layout.ugamma[k]]), 3)
-    uω2 = ntuple(k -> Vector{Float64}(sys.x[layout.uomega2[k]]), 3)
-    p2 = Vector{Float64}(sys.x[layout.pomega2])
-    grad_u2 = ntuple(a -> PenguinStokes._scalar_gradient(model.op_u2[a], uω2[a], uγ[a]), 3)
 
-    # Numerical drag from outside traction integrated on Γ.
-    F = zeros(3)
-    for i in 1:model.cap_p1.ntotal
-        V = model.cap_p1.buf.V[i]
-        Γ = model.cap_p1.buf.Γ[i]
-        if !(isfinite(V) && V > 0.0 && isfinite(Γ) && Γ > 0.0)
-            continue
-        end
-        n1 = model.cap_p1.n_γ[i]  # outward from inside drop (phase 1) toward phase 2
-        G = @SMatrix [
-            grad_u2[1][1][i] grad_u2[1][2][i] grad_u2[1][3][i]
-            grad_u2[2][1][i] grad_u2[2][2][i] grad_u2[2][3][i]
-            grad_u2[3][1][i] grad_u2[3][2][i] grad_u2[3][3][i]
-        ]
-        σ2 = mu_out .* (G + transpose(G)) - p2[i] .* I
-        t_outer_on_drop = -(σ2 * n1)
-        F .+= Γ .* collect(t_outer_on_drop)
-    end
+    # Numerical drag from the outside-phase (phase 2) discrete momentum balance,
+    # using the same cut-face flux operators as the assembly. This avoids the
+    # ill-conditioned pointwise sigma*n reconstruction (which divides by
+    # vanishing cut-cell volumes and does not converge under refinement).
+    fb = integrated_embedded_force_balance(model, sys; phase=2, convention=:on_body)
 
-    return (Fz=F[3], res=norm(sys.A * sys.x - sys.b))
+    return (Fz=fb.force[3], res=norm(sys.A * sys.x - sys.b))
 end
 
 Fz_ref = hadamard_rybczynski_drag(mu_out, mu_in, d, U)
@@ -169,7 +157,7 @@ U_term = hadamard_rybczynski_terminal_velocity(mu_out, mu_in, rho_out, rho_in, d
 
 println("Hadamard-Rybczynski Fz_ref = ", Fz_ref)
 println("Terminal speed (formula)   = ", U_term)
-for n in (11, 15, 19)
+for n in (11, 15, 19, 23, 27, 31)
     r = solve_drag(n)
     println("n=$n  ||Ax-b||=$(r.res)  Fz_num=$(r.Fz)  ratio=$(r.Fz / Fz_ref)")
 end

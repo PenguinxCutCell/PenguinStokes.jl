@@ -26,6 +26,26 @@ constraint over active pressure cells.
 struct MeanPressureGauge <: AbstractPressureGauge end
 
 """
+    PerPhasePressureGauge(inner=MeanPressureGauge())
+
+Two-phase pressure gauge that applies `inner` (a `MeanPressureGauge` or
+`PinPressureGauge`) independently to *each* phase pressure block.
+
+The default two-phase gauge anchors phase 1 only and relies on the interface
+traction-jump to fix phase 2 relative to phase 1. That coupling is `Γ`-weighted
+(`O(h^2)`) and only determines the phase-2 level when the interface carries a
+strong traction jump. For problems with a *zero* interface traction-jump — e.g.
+a viscous drop in an externally-imposed flow (drag) — the phase-2 pressure
+constant is a near-null mode that pollutes the solution. Use this gauge there to
+anchor both phases. `MeanPressureGauge` inner is recommended (robust to
+degenerate cut cells; the pin variant can land on a tiny cut cell).
+"""
+struct PerPhasePressureGauge{G<:AbstractPressureGauge} <: AbstractPressureGauge
+    inner::G
+end
+PerPhasePressureGauge() = PerPhasePressureGauge(MeanPressureGauge())
+
+"""
     StokesLayout{N}
 
 Unknown ordering for monophasic Stokes:
